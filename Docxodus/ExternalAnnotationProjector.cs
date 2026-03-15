@@ -368,10 +368,228 @@ public static class ExternalAnnotationProjector
 
     #endregion
 
+    #region Incremental Annotation API
+
+    /// <summary>
+    /// Project annotations onto an HTML string (already converted from DOCX).
+    /// This avoids re-converting the DOCX when only annotations change.
+    /// </summary>
+    /// <param name="html">HTML string (previously converted via WmlToHtmlConverter).</param>
+    /// <param name="annotationSet">The external annotation set to project.</param>
+    /// <param name="settings">Projection settings.</param>
+    /// <returns>HTML string with annotations projected.</returns>
+    public static string ProjectAnnotationsOntoHtml(
+        string html,
+        ExternalAnnotationSet annotationSet,
+        ExternalAnnotationProjectionSettings? settings = null)
+    {
+        if (string.IsNullOrEmpty(html)) throw new ArgumentNullException(nameof(html));
+        if (annotationSet == null) throw new ArgumentNullException(nameof(annotationSet));
+        settings ??= new ExternalAnnotationProjectionSettings();
+
+        var htmlDoc = XElement.Parse(html);
+        var result = ProjectAnnotations(htmlDoc, annotationSet, settings);
+        return result.ToString();
+    }
+
+    /// <summary>
+    /// Add a single annotation to existing HTML without re-converting the document.
+    /// The HTML should already be converted (with or without other annotations).
+    /// </summary>
+    /// <param name="html">HTML string.</param>
+    /// <param name="annotation">The annotation to add.</param>
+    /// <param name="label">Label definition for the annotation.</param>
+    /// <param name="settings">Projection settings.</param>
+    /// <returns>HTML string with the annotation added.</returns>
+    public static string AddAnnotationToHtml(
+        string html,
+        OpenContractsAnnotation annotation,
+        AnnotationLabel? label,
+        ExternalAnnotationProjectionSettings? settings = null)
+    {
+        if (string.IsNullOrEmpty(html)) throw new ArgumentNullException(nameof(html));
+        if (annotation == null) throw new ArgumentNullException(nameof(annotation));
+        settings ??= new ExternalAnnotationProjectionSettings();
+
+        var htmlDoc = XElement.Parse(html);
+
+        // Build text map and find annotation location
+        var textMap = BuildTextMap(htmlDoc);
+        var htmlText = GetHtmlText(textMap);
+        var usedOffsets = new HashSet<int>();
+
+        if (annotation.AnnotationJson is TextSpan span)
+        {
+            var searchText = span.Text ?? annotation.RawText;
+            if (!string.IsNullOrEmpty(searchText))
+            {
+                var htmlLocation = FindTextInHtml(htmlText, searchText, usedOffsets);
+                if (htmlLocation != null)
+                {
+                    var htmlSpan = new TextSpan
+                    {
+                        Id = span.Id,
+                        Start = htmlLocation.Value.start,
+                        End = htmlLocation.Value.end,
+                        Text = searchText
+                    };
+
+                    textMap = BuildTextMap(htmlDoc);
+                    ProjectSingleAnnotation(htmlDoc, textMap, annotation, htmlSpan, label, settings);
+                }
+            }
+        }
+
+        // Add per-annotation CSS (label color class)
+        if (label != null)
+        {
+            AddSingleAnnotationCss(htmlDoc, annotation, label, settings);
+        }
+
+        return htmlDoc.ToString();
+    }
+
+    /// <summary>
+    /// Remove a single annotation from HTML by annotation ID.
+    /// Unwraps annotation spans back to plain text.
+    /// </summary>
+    /// <param name="html">HTML string with annotations.</param>
+    /// <param name="annotationId">ID of the annotation to remove.</param>
+    /// <param name="cssClassPrefix">CSS class prefix used for annotations (default: "ext-annot-").</param>
+    /// <returns>HTML string with the annotation removed.</returns>
+    public static string RemoveAnnotationFromHtml(
+        string html,
+        string annotationId,
+        string cssClassPrefix = "ext-annot-")
+    {
+        if (string.IsNullOrEmpty(html)) throw new ArgumentNullException(nameof(html));
+        if (string.IsNullOrEmpty(annotationId)) throw new ArgumentNullException(nameof(annotationId));
+
+        var htmlDoc = XElement.Parse(html);
+
+        // Find all spans with data-annotation-id matching
+        var annotationSpans = htmlDoc.Descendants("span")
+            .Where(e => (string?)e.Attribute("data-annotation-id") == annotationId)
+            .ToList();
+
+        foreach (var span in annotationSpans)
+        {
+            // Remove label child spans
+            var labelSpans = span.Elements("span")
+                .Where(e =>
+                {
+                    var cls = (string?)e.Attribute("class") ?? "";
+                    return cls.Contains($"{cssClassPrefix}label");
+                })
+                .ToList();
+
+            foreach (var labelSpan in labelSpans)
+            {
+                labelSpan.Remove();
+            }
+
+            // Replace the annotation span with its remaining content (unwrap)
+            var parent = span.Parent;
+            if (parent != null)
+            {
+                var nodes = span.Nodes().ToList();
+                foreach (var node in nodes)
+                {
+                    span.AddBeforeSelf(node);
+                }
+                span.Remove();
+            }
+        }
+
+        return htmlDoc.ToString();
+    }
+
+    /// <summary>
+    /// Generate CSS to hide annotations with specific label IDs.
+    /// This enables CSS-based label filtering without re-rendering.
+    /// </summary>
+    /// <param name="hiddenLabelIds">Label IDs to hide.</param>
+    /// <param name="cssClassPrefix">CSS class prefix (default: "ext-annot-").</param>
+    /// <returns>CSS string that hides the specified labels.</returns>
+    public static string GenerateVisibilityCss(
+        IEnumerable<string> hiddenLabelIds,
+        string cssClassPrefix = "ext-annot-")
+    {
+        if (hiddenLabelIds == null) throw new ArgumentNullException(nameof(hiddenLabelIds));
+
+        var css = new StringBuilder();
+        css.AppendLine("/* Annotation Visibility Overrides */");
+
+        foreach (var labelId in hiddenLabelIds)
+        {
+            var safeId = labelId.Replace(" ", "-").Replace(".", "-");
+            // Hide the highlight styling but keep the text visible
+            css.AppendLine($".{cssClassPrefix}highlight[data-label-id=\"{safeId}\"] {{");
+            css.AppendLine("  background-color: transparent !important;");
+            css.AppendLine("  border-bottom: none !important;");
+            css.AppendLine("}");
+            // Hide the label text
+            css.AppendLine($".{cssClassPrefix}highlight[data-label-id=\"{safeId}\"] .{cssClassPrefix}label {{");
+            css.AppendLine("  display: none !important;");
+            css.AppendLine("}");
+        }
+
+        return css.ToString();
+    }
+
+    /// <summary>
+    /// Generate annotation CSS for a set of labels.
+    /// Useful when you need the CSS separately from the HTML (e.g., for incremental updates).
+    /// </summary>
+    /// <param name="labels">Label definitions.</param>
+    /// <param name="settings">Projection settings.</param>
+    /// <returns>CSS string for the given labels and settings.</returns>
+    public static string GenerateAnnotationCssString(
+        Dictionary<string, AnnotationLabel> labels,
+        ExternalAnnotationProjectionSettings? settings = null)
+    {
+        if (labels == null) throw new ArgumentNullException(nameof(labels));
+        settings ??= new ExternalAnnotationProjectionSettings();
+        return BuildAnnotationCssString(labels, settings);
+    }
+
+    /// <summary>
+    /// Add CSS for a single annotation to existing HTML.
+    /// Used by AddAnnotationToHtml to inject per-label color classes.
+    /// </summary>
+    private static void AddSingleAnnotationCss(
+        XElement html,
+        OpenContractsAnnotation annotation,
+        AnnotationLabel label,
+        ExternalAnnotationProjectionSettings settings)
+    {
+        var prefix = settings.CssClassPrefix;
+        var safeId = (annotation.AnnotationLabel ?? "").Replace(" ", "-").Replace(".", "-");
+
+        var css = new StringBuilder();
+        css.AppendLine();
+        css.AppendLine($"/* Annotation label: {safeId} */");
+        css.AppendLine($".{prefix}label-{safeId} {{");
+        css.AppendLine($"  --annot-color: {label.Color};");
+        css.AppendLine("}");
+
+        var head = html.Descendants()
+            .FirstOrDefault(e => e.Name.LocalName.Equals("head", StringComparison.OrdinalIgnoreCase));
+
+        if (head != null)
+        {
+            var style = new XElement("style",
+                new XAttribute("type", "text/css"),
+                new XText(css.ToString()));
+            head.Add(style);
+        }
+    }
+
+    #endregion
+
     #region CSS Generation
 
-    private static void AddAnnotationCss(
-        XElement html,
+    private static string BuildAnnotationCssString(
         Dictionary<string, AnnotationLabel> labels,
         ExternalAnnotationProjectionSettings settings)
     {
@@ -421,6 +639,16 @@ public static class ExternalAnnotationProjector
             css.AppendLine("}");
         }
 
+        return css.ToString();
+    }
+
+    private static void AddAnnotationCss(
+        XElement html,
+        Dictionary<string, AnnotationLabel> labels,
+        ExternalAnnotationProjectionSettings settings)
+    {
+        var css = BuildAnnotationCssString(labels, settings);
+
         // Find or create head element
         var head = html.Descendants()
             .FirstOrDefault(e => e.Name.LocalName.Equals("head", StringComparison.OrdinalIgnoreCase));
@@ -429,7 +657,7 @@ public static class ExternalAnnotationProjector
         {
             var style = new XElement("style",
                 new XAttribute("type", "text/css"),
-                new XText(css.ToString()));
+                new XText(css));
             head.Add(style);
         }
     }

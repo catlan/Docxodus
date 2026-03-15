@@ -1090,6 +1090,244 @@ public partial class DocumentConverter
         }
     }
 
+    /// <summary>
+    /// Project external annotations onto already-converted HTML.
+    /// This avoids re-converting the DOCX when only annotations change.
+    /// </summary>
+    [JSExport]
+    public static string ProjectAnnotationsOntoHtml(
+        string html,
+        string annotationSetJson,
+        string extAnnotCssClassPrefix,
+        int extAnnotLabelMode)
+    {
+        if (string.IsNullOrEmpty(html))
+        {
+            return SerializeError("HTML content is required");
+        }
+
+        if (string.IsNullOrEmpty(annotationSetJson))
+        {
+            return SerializeError("Annotation set JSON is required");
+        }
+
+        try
+        {
+            var set = DeserializeExternalAnnotationSet(annotationSetJson);
+            if (set == null)
+            {
+                return SerializeError("Invalid annotation set JSON");
+            }
+
+            var projectionSettings = new ExternalAnnotationProjectionSettings
+            {
+                CssClassPrefix = string.IsNullOrEmpty(extAnnotCssClassPrefix) ? "ext-annot-" : extAnnotCssClassPrefix,
+                LabelMode = (AnnotationLabelMode)extAnnotLabelMode,
+                IncludeMetadata = true,
+                ValidateBeforeProjection = true
+            };
+
+            var result = ExternalAnnotationProjector.ProjectAnnotationsOntoHtml(
+                html, set, projectionSettings);
+
+            var response = new HtmlConversionResponse { Html = result };
+            return JsonSerializer.Serialize(response, DocxodusJsonContext.Default.HtmlConversionResponse);
+        }
+        catch (Exception ex)
+        {
+            return SerializeError(ex.Message, ex.GetType().Name, ex.StackTrace);
+        }
+    }
+
+    /// <summary>
+    /// Add a single annotation to existing HTML without re-converting the document.
+    /// </summary>
+    [JSExport]
+    public static string AddAnnotationToHtml(
+        string html,
+        string annotationJson,
+        string labelJson,
+        string extAnnotCssClassPrefix,
+        int extAnnotLabelMode)
+    {
+        if (string.IsNullOrEmpty(html))
+        {
+            return SerializeError("HTML content is required");
+        }
+
+        if (string.IsNullOrEmpty(annotationJson))
+        {
+            return SerializeError("Annotation JSON is required");
+        }
+
+        try
+        {
+            var annotationDto = JsonSerializer.Deserialize(annotationJson, DocxodusJsonContext.Default.OpenContractsAnnotationDto);
+            if (annotationDto == null)
+            {
+                return SerializeError("Invalid annotation JSON");
+            }
+
+            var annotation = ConvertDtoToAnnotation(annotationDto);
+
+            AnnotationLabel? label = null;
+            if (!string.IsNullOrEmpty(labelJson))
+            {
+                var labelDto = JsonSerializer.Deserialize(labelJson, DocxodusJsonContext.Default.AnnotationLabelDto);
+                if (labelDto != null)
+                {
+                    label = new AnnotationLabel
+                    {
+                        Id = labelDto.Id,
+                        Color = labelDto.Color,
+                        Description = labelDto.Description,
+                        Icon = labelDto.Icon,
+                        Text = labelDto.Text,
+                        LabelType = labelDto.LabelType
+                    };
+                }
+            }
+
+            var settings = new ExternalAnnotationProjectionSettings
+            {
+                CssClassPrefix = string.IsNullOrEmpty(extAnnotCssClassPrefix) ? "ext-annot-" : extAnnotCssClassPrefix,
+                LabelMode = (AnnotationLabelMode)extAnnotLabelMode,
+                IncludeMetadata = true
+            };
+
+            var result = ExternalAnnotationProjector.AddAnnotationToHtml(
+                html, annotation, label, settings);
+
+            var response = new HtmlConversionResponse { Html = result };
+            return JsonSerializer.Serialize(response, DocxodusJsonContext.Default.HtmlConversionResponse);
+        }
+        catch (Exception ex)
+        {
+            return SerializeError(ex.Message, ex.GetType().Name, ex.StackTrace);
+        }
+    }
+
+    /// <summary>
+    /// Remove a single annotation from HTML by annotation ID.
+    /// </summary>
+    [JSExport]
+    public static string RemoveAnnotationFromHtml(
+        string html,
+        string annotationId,
+        string extAnnotCssClassPrefix)
+    {
+        if (string.IsNullOrEmpty(html))
+        {
+            return SerializeError("HTML content is required");
+        }
+
+        if (string.IsNullOrEmpty(annotationId))
+        {
+            return SerializeError("Annotation ID is required");
+        }
+
+        try
+        {
+            var prefix = string.IsNullOrEmpty(extAnnotCssClassPrefix) ? "ext-annot-" : extAnnotCssClassPrefix;
+            var result = ExternalAnnotationProjector.RemoveAnnotationFromHtml(
+                html, annotationId, prefix);
+
+            var response = new HtmlConversionResponse { Html = result };
+            return JsonSerializer.Serialize(response, DocxodusJsonContext.Default.HtmlConversionResponse);
+        }
+        catch (Exception ex)
+        {
+            return SerializeError(ex.Message, ex.GetType().Name, ex.StackTrace);
+        }
+    }
+
+    /// <summary>
+    /// Generate CSS to hide annotations with specific label IDs.
+    /// Enables CSS-based label filtering without re-rendering.
+    /// </summary>
+    [JSExport]
+    public static string GenerateAnnotationVisibilityCss(
+        string hiddenLabelIdsJson,
+        string extAnnotCssClassPrefix)
+    {
+        if (string.IsNullOrEmpty(hiddenLabelIdsJson))
+        {
+            return SerializeError("Hidden label IDs JSON is required");
+        }
+
+        try
+        {
+            var hiddenLabelIds = JsonSerializer.Deserialize(hiddenLabelIdsJson, DocxodusJsonContext.Default.StringArray);
+            if (hiddenLabelIds == null)
+            {
+                return SerializeError("Invalid hidden label IDs JSON");
+            }
+
+            var prefix = string.IsNullOrEmpty(extAnnotCssClassPrefix) ? "ext-annot-" : extAnnotCssClassPrefix;
+            var css = ExternalAnnotationProjector.GenerateVisibilityCss(hiddenLabelIds, prefix);
+
+            var response = new CssResponse { Css = css };
+            return JsonSerializer.Serialize(response, DocxodusJsonContext.Default.CssResponse);
+        }
+        catch (Exception ex)
+        {
+            return SerializeError(ex.Message, ex.GetType().Name, ex.StackTrace);
+        }
+    }
+
+    /// <summary>
+    /// Generate annotation CSS for a set of labels (without HTML).
+    /// Useful when managing CSS separately from HTML content.
+    /// </summary>
+    [JSExport]
+    public static string GenerateAnnotationCss(
+        string labelsJson,
+        string extAnnotCssClassPrefix,
+        int extAnnotLabelMode)
+    {
+        if (string.IsNullOrEmpty(labelsJson))
+        {
+            return SerializeError("Labels JSON is required");
+        }
+
+        try
+        {
+            var labelDtos = JsonSerializer.Deserialize(labelsJson, DocxodusJsonContext.Default.DictionaryStringAnnotationLabelDto);
+            if (labelDtos == null)
+            {
+                return SerializeError("Invalid labels JSON");
+            }
+
+            var labels = labelDtos.ToDictionary(
+                kvp => kvp.Key,
+                kvp => new AnnotationLabel
+                {
+                    Id = kvp.Value.Id,
+                    Color = kvp.Value.Color,
+                    Description = kvp.Value.Description,
+                    Icon = kvp.Value.Icon,
+                    Text = kvp.Value.Text,
+                    LabelType = kvp.Value.LabelType
+                });
+
+            var settings = new ExternalAnnotationProjectionSettings
+            {
+                CssClassPrefix = string.IsNullOrEmpty(extAnnotCssClassPrefix) ? "ext-annot-" : extAnnotCssClassPrefix,
+                LabelMode = (AnnotationLabelMode)extAnnotLabelMode,
+                IncludeMetadata = true
+            };
+
+            var css = ExternalAnnotationProjector.GenerateAnnotationCssString(labels, settings);
+
+            var response = new CssResponse { Css = css };
+            return JsonSerializer.Serialize(response, DocxodusJsonContext.Default.CssResponse);
+        }
+        catch (Exception ex)
+        {
+            return SerializeError(ex.Message, ex.GetType().Name, ex.StackTrace);
+        }
+    }
+
     private static ExternalAnnotationSetDto ConvertExternalAnnotationSetToDto(ExternalAnnotationSet set)
     {
         return new ExternalAnnotationSetDto

@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased] - .NET 8 / Open XML SDK 3.x Migration
 
+### Added
+- **Incremental annotation overlay API (Issue #106)** - Decouple HTML conversion from annotation projection to avoid full WASM re-conversion
+  - `ProjectAnnotationsOntoHtml()` - Project a full annotation set onto already-converted HTML
+  - `AddAnnotationToHtml()` - Add a single annotation to existing HTML without re-converting the document
+  - `RemoveAnnotationFromHtml()` - Remove a single annotation by ID, unwrapping spans back to plain text
+  - `GenerateVisibilityCss()` - Generate CSS to hide/show annotations by label ID for instant toggling
+  - `GenerateAnnotationCssString()` - Generate annotation CSS separately for independent management
+  - All methods available in .NET, WASM (JSExport), and npm TypeScript wrapper
+  - CSS-based label filtering enables responsive toggle without any re-rendering
+
 ### Fixed
 - **Move markup Word compatibility (Issue #96)** - Documents with move operations no longer cause Word "unreadable content" warnings
   - Added `SimplifyMoveMarkup` setting to convert native move markup (`w:moveFrom`/`w:moveTo`) to simple `w:del`/`w:ins`

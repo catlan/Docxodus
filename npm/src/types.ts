@@ -477,6 +477,34 @@ export interface DocxodusWasmExports {
       searchText: string,
       maxResults: number
     ) => string;
+    // Incremental annotation overlay methods
+    ProjectAnnotationsOntoHtml: (
+      html: string,
+      annotationSetJson: string,
+      extAnnotCssClassPrefix: string,
+      extAnnotLabelMode: number
+    ) => string;
+    AddAnnotationToHtml: (
+      html: string,
+      annotationJson: string,
+      labelJson: string,
+      extAnnotCssClassPrefix: string,
+      extAnnotLabelMode: number
+    ) => string;
+    RemoveAnnotationFromHtml: (
+      html: string,
+      annotationId: string,
+      extAnnotCssClassPrefix: string
+    ) => string;
+    GenerateAnnotationVisibilityCss: (
+      hiddenLabelIdsJson: string,
+      extAnnotCssClassPrefix: string
+    ) => string;
+    GenerateAnnotationCss: (
+      labelsJson: string,
+      extAnnotCssClassPrefix: string,
+      extAnnotLabelMode: number
+    ) => string;
   };
   DocumentComparer: {
     CompareDocuments: (
