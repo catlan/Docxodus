@@ -555,6 +555,199 @@ namespace OxPt
         }
 
         #endregion
+
+        #region Incremental Annotation Overlay Tests (Issue #106)
+
+        [Fact]
+        public void EA020_ProjectAnnotationsOntoHtml_AddsAnnotationSpans()
+        {
+            // Arrange
+            var doc = CreateSimpleTestDocument("Hello, world! This is a test document.");
+            var set = ExternalAnnotationManager.CreateAnnotationSet(doc, "test");
+
+            set.TextLabels["GREETING"] = new AnnotationLabel
+            {
+                Id = "GREETING",
+                Text = "Greeting",
+                Color = "#FFEB3B"
+            };
+
+            var annotation = ExternalAnnotationManager.CreateAnnotation(
+                "ann-001", "GREETING", set.Content, 0, 5);
+            Assert.NotNull(annotation);
+            set.LabelledText.Add(annotation);
+
+            // Convert HTML once (without annotations)
+            var baseHtml = WmlToHtmlConverter.ConvertToHtml(doc, new WmlToHtmlConverterSettings
+            {
+                PageTitle = "Test"
+            }).ToString();
+
+            // Act - project annotations onto cached HTML
+            var annotatedHtml = ExternalAnnotationProjector.ProjectAnnotationsOntoHtml(
+                baseHtml, set);
+
+            // Assert
+            Assert.Contains("data-annotation-id=\"ann-001\"", annotatedHtml);
+            Assert.Contains("ext-annot-highlight", annotatedHtml);
+            Assert.Contains("--annot-color: #FFEB3B", annotatedHtml);
+        }
+
+        [Fact]
+        public void EA021_AddAnnotationToHtml_AddsSingleAnnotation()
+        {
+            // Arrange
+            var doc = CreateSimpleTestDocument("Hello, world! This is a test document.");
+            var baseHtml = WmlToHtmlConverter.ConvertToHtml(doc, new WmlToHtmlConverterSettings
+            {
+                PageTitle = "Test"
+            }).ToString();
+
+            var set = ExternalAnnotationManager.CreateAnnotationSet(doc, "test");
+            var annotation = ExternalAnnotationManager.CreateAnnotation(
+                "ann-single", "CLAUSE", set.Content, 0, 5);
+            Assert.NotNull(annotation);
+
+            var label = new AnnotationLabel
+            {
+                Id = "CLAUSE",
+                Text = "Clause",
+                Color = "#FF5722"
+            };
+
+            // Act
+            var result = ExternalAnnotationProjector.AddAnnotationToHtml(
+                baseHtml, annotation, label);
+
+            // Assert
+            Assert.Contains("data-annotation-id=\"ann-single\"", result);
+            Assert.Contains("--annot-color: #FF5722", result);
+        }
+
+        [Fact]
+        public void EA022_RemoveAnnotationFromHtml_RemovesAnnotationSpans()
+        {
+            // Arrange - first project an annotation
+            var doc = CreateSimpleTestDocument("Hello, world!");
+            var set = ExternalAnnotationManager.CreateAnnotationSet(doc, "test");
+
+            set.TextLabels["GREETING"] = new AnnotationLabel
+            {
+                Id = "GREETING",
+                Text = "Greeting",
+                Color = "#FFEB3B"
+            };
+
+            var annotation = ExternalAnnotationManager.CreateAnnotation(
+                "ann-remove", "GREETING", set.Content, 0, 5);
+            Assert.NotNull(annotation);
+            set.LabelledText.Add(annotation);
+
+            var baseHtml = WmlToHtmlConverter.ConvertToHtml(doc, new WmlToHtmlConverterSettings
+            {
+                PageTitle = "Test"
+            }).ToString();
+
+            var annotatedHtml = ExternalAnnotationProjector.ProjectAnnotationsOntoHtml(
+                baseHtml, set);
+            Assert.Contains("data-annotation-id=\"ann-remove\"", annotatedHtml);
+
+            // Act
+            var result = ExternalAnnotationProjector.RemoveAnnotationFromHtml(
+                annotatedHtml, "ann-remove");
+
+            // Assert - annotation spans should be removed
+            Assert.DoesNotContain("data-annotation-id=\"ann-remove\"", result);
+            // But the text should still be there
+            Assert.Contains("Hello", result);
+        }
+
+        [Fact]
+        public void EA023_GenerateVisibilityCss_HidesSpecifiedLabels()
+        {
+            // Act
+            var css = ExternalAnnotationProjector.GenerateVisibilityCss(
+                new[] { "DRAFT", "INTERNAL" });
+
+            // Assert
+            Assert.Contains("data-label-id=\"DRAFT\"", css);
+            Assert.Contains("data-label-id=\"INTERNAL\"", css);
+            Assert.Contains("background-color: transparent", css);
+            Assert.Contains("display: none", css);
+        }
+
+        [Fact]
+        public void EA024_GenerateAnnotationCssString_GeneratesValidCss()
+        {
+            // Arrange
+            var labels = new Dictionary<string, AnnotationLabel>
+            {
+                ["CLAUSE"] = new AnnotationLabel
+                {
+                    Id = "CLAUSE",
+                    Text = "Clause",
+                    Color = "#FF5722"
+                },
+                ["TERM"] = new AnnotationLabel
+                {
+                    Id = "TERM",
+                    Text = "Term",
+                    Color = "#2196F3"
+                }
+            };
+
+            // Act
+            var css = ExternalAnnotationProjector.GenerateAnnotationCssString(labels);
+
+            // Assert
+            Assert.Contains("ext-annot-highlight", css);
+            Assert.Contains("ext-annot-label-CLAUSE", css);
+            Assert.Contains("#FF5722", css);
+            Assert.Contains("ext-annot-label-TERM", css);
+            Assert.Contains("#2196F3", css);
+        }
+
+        [Fact]
+        public void EA025_ProjectAnnotationsOntoHtml_ThenRemove_PreservesText()
+        {
+            // Arrange - use two separate paragraphs to avoid text splitting issues
+            var doc = CreateTestDocument(body =>
+            {
+                body.AppendChild(new Paragraph(new Run(new Text("Alpha paragraph"))));
+                body.AppendChild(new Paragraph(new Run(new Text("Beta paragraph"))));
+            });
+            var set = ExternalAnnotationManager.CreateAnnotationSet(doc, "test");
+
+            set.TextLabels["LABEL_A"] = new AnnotationLabel { Id = "LABEL_A", Text = "A", Color = "#FF0000" };
+            set.TextLabels["LABEL_B"] = new AnnotationLabel { Id = "LABEL_B", Text = "B", Color = "#00FF00" };
+
+            // Use text search to create annotations (more reliable than offset-based)
+            var ann1 = ExternalAnnotationManager.CreateAnnotationFromSearch(
+                "ann-a", "LABEL_A", set.Content, "Alpha", 1);
+            var ann2 = ExternalAnnotationManager.CreateAnnotationFromSearch(
+                "ann-b", "LABEL_B", set.Content, "Beta", 1);
+            Assert.NotNull(ann1);
+            Assert.NotNull(ann2);
+            set.LabelledText.Add(ann1);
+            set.LabelledText.Add(ann2);
+
+            var baseHtml = WmlToHtmlConverter.ConvertToHtml(doc, new WmlToHtmlConverterSettings
+            {
+                PageTitle = "Test"
+            }).ToString();
+
+            // Act - project both, then remove one
+            var annotatedHtml = ExternalAnnotationProjector.ProjectAnnotationsOntoHtml(baseHtml, set);
+            var afterRemove = ExternalAnnotationProjector.RemoveAnnotationFromHtml(annotatedHtml, "ann-a");
+
+            // Assert - ann-a removed, ann-b still present, all text preserved
+            Assert.DoesNotContain("data-annotation-id=\"ann-a\"", afterRemove);
+            Assert.Contains("data-annotation-id=\"ann-b\"", afterRemove);
+            Assert.Contains("Alpha", afterRemove);
+            Assert.Contains("Beta", afterRemove);
+        }
+
+        #endregion
     }
 }
 

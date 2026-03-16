@@ -1921,3 +1921,236 @@ function convertExternalAnnotationSet(parsed: any): ExternalAnnotationSet {
   };
 }
 
+// ============================================================================
+// Incremental Annotation Overlay API (Issue #106)
+// ============================================================================
+
+/**
+ * Project external annotations onto already-converted HTML.
+ * This avoids full DOCX re-conversion when only annotations change.
+ *
+ * Workflow:
+ * 1. Convert DOCX to HTML once using `convertDocxToHtml()`
+ * 2. Use this function to overlay annotations on the cached HTML
+ * 3. When annotations change, call this again with the same base HTML
+ *
+ * @param html - HTML string (previously converted via convertDocxToHtml)
+ * @param annotationSet - The external annotation set to project
+ * @param projectionOptions - Projection settings (CSS prefix, label mode, etc.)
+ * @returns HTML string with annotations projected
+ * @throws Error if projection fails
+ *
+ * @example
+ * ```typescript
+ * // Step 1: Convert once
+ * const baseHtml = await convertDocxToHtml(docxFile);
+ *
+ * // Step 2: Project annotations (fast, no DOCX re-conversion)
+ * const annotatedHtml = await projectAnnotationsOntoHtml(baseHtml, annotationSet);
+ *
+ * // Step 3: When annotations change, project again on the same base HTML
+ * annotationSet.labelledText.push(newAnnotation);
+ * const updatedHtml = await projectAnnotationsOntoHtml(baseHtml, annotationSet);
+ * ```
+ */
+export async function projectAnnotationsOntoHtml(
+  html: string,
+  annotationSet: ExternalAnnotationSet,
+  projectionOptions?: ExternalAnnotationProjectionSettings
+): Promise<string> {
+  const exports = ensureInitialized();
+
+  await yieldToMain();
+
+  const annotationSetJson = JSON.stringify(annotationSet);
+  const result = exports.DocumentConverter.ProjectAnnotationsOntoHtml(
+    html,
+    annotationSetJson,
+    projectionOptions?.cssClassPrefix ?? "ext-annot-",
+    projectionOptions?.labelMode ?? AnnotationLabelMode.Above
+  );
+
+  if (isErrorResponse(result)) {
+    const error = parseError(result);
+    throw new Error(`Failed to project annotations: ${error.error}`);
+  }
+
+  const parsed = JSON.parse(result);
+  return parsed.Html ?? parsed.html;
+}
+
+/**
+ * Add a single annotation to existing HTML without re-converting the document.
+ * This is the fastest way to add one annotation to already-rendered HTML.
+ *
+ * @param html - HTML string (with or without existing annotations)
+ * @param annotation - The annotation to add
+ * @param label - Label definition for the annotation (optional, for color/text)
+ * @param projectionOptions - Projection settings
+ * @returns HTML string with the annotation added
+ * @throws Error if operation fails
+ *
+ * @example
+ * ```typescript
+ * const annotation = createAnnotation("ann-new", "CLAUSE", set.content, 100, 150);
+ * const label = { id: "CLAUSE", text: "Clause", color: "#FF5722" };
+ * const updatedHtml = await addAnnotationToHtml(currentHtml, annotation, label);
+ * ```
+ */
+export async function addAnnotationToHtml(
+  html: string,
+  annotation: OpenContractsAnnotation,
+  label?: AnnotationLabel,
+  projectionOptions?: ExternalAnnotationProjectionSettings
+): Promise<string> {
+  const exports = ensureInitialized();
+
+  await yieldToMain();
+
+  const annotationJson = JSON.stringify(annotation);
+  const labelJson = label ? JSON.stringify(label) : "";
+  const result = exports.DocumentConverter.AddAnnotationToHtml(
+    html,
+    annotationJson,
+    labelJson,
+    projectionOptions?.cssClassPrefix ?? "ext-annot-",
+    projectionOptions?.labelMode ?? AnnotationLabelMode.Above
+  );
+
+  if (isErrorResponse(result)) {
+    const error = parseError(result);
+    throw new Error(`Failed to add annotation to HTML: ${error.error}`);
+  }
+
+  const parsed = JSON.parse(result);
+  return parsed.Html ?? parsed.html;
+}
+
+/**
+ * Remove a single annotation from HTML by annotation ID.
+ * Unwraps annotation spans back to plain text.
+ *
+ * @param html - HTML string with annotations
+ * @param annotationId - ID of the annotation to remove
+ * @param cssClassPrefix - CSS class prefix used for annotations (default: "ext-annot-")
+ * @returns HTML string with the annotation removed
+ * @throws Error if operation fails
+ *
+ * @example
+ * ```typescript
+ * const updatedHtml = await removeAnnotationFromHtml(currentHtml, "ann-001");
+ * ```
+ */
+export async function removeAnnotationFromHtml(
+  html: string,
+  annotationId: string,
+  cssClassPrefix?: string
+): Promise<string> {
+  const exports = ensureInitialized();
+
+  await yieldToMain();
+
+  const result = exports.DocumentConverter.RemoveAnnotationFromHtml(
+    html,
+    annotationId,
+    cssClassPrefix ?? "ext-annot-"
+  );
+
+  if (isErrorResponse(result)) {
+    const error = parseError(result);
+    throw new Error(`Failed to remove annotation from HTML: ${error.error}`);
+  }
+
+  const parsed = JSON.parse(result);
+  return parsed.Html ?? parsed.html;
+}
+
+/**
+ * Generate CSS to hide annotations with specific label IDs.
+ * Enables CSS-based label filtering without re-rendering HTML.
+ *
+ * Apply the returned CSS to your document (e.g., via a `<style>` element)
+ * to hide/show annotations by label. This is much faster than re-projecting
+ * all annotations.
+ *
+ * @param hiddenLabelIds - Array of label IDs to hide
+ * @param cssClassPrefix - CSS class prefix (default: "ext-annot-")
+ * @returns CSS string that hides the specified labels
+ * @throws Error if operation fails
+ *
+ * @example
+ * ```typescript
+ * // Hide annotations with label "DRAFT" and "INTERNAL"
+ * const css = await generateAnnotationVisibilityCss(["DRAFT", "INTERNAL"]);
+ *
+ * // Apply to a <style> element in the DOM
+ * const styleEl = document.getElementById("visibility-overrides");
+ * styleEl.textContent = css;
+ *
+ * // To show all annotations again, clear the style:
+ * styleEl.textContent = "";
+ * ```
+ */
+export async function generateAnnotationVisibilityCss(
+  hiddenLabelIds: string[],
+  cssClassPrefix?: string
+): Promise<string> {
+  const exports = ensureInitialized();
+
+  await yieldToMain();
+
+  const result = exports.DocumentConverter.GenerateAnnotationVisibilityCss(
+    JSON.stringify(hiddenLabelIds),
+    cssClassPrefix ?? "ext-annot-"
+  );
+
+  if (isErrorResponse(result)) {
+    const error = parseError(result);
+    throw new Error(`Failed to generate visibility CSS: ${error.error}`);
+  }
+
+  const parsed = JSON.parse(result);
+  return parsed.Css ?? parsed.css;
+}
+
+/**
+ * Generate annotation CSS for a set of labels.
+ * Useful when managing CSS separately from HTML content.
+ *
+ * @param labels - Label definitions (keyed by label ID)
+ * @param projectionOptions - Projection settings
+ * @returns CSS string for the annotation styles
+ * @throws Error if operation fails
+ *
+ * @example
+ * ```typescript
+ * const labels = {
+ *   "CLAUSE": { id: "CLAUSE", text: "Clause", color: "#FF5722" },
+ *   "TERM": { id: "TERM", text: "Term", color: "#2196F3" },
+ * };
+ * const css = await generateAnnotationCss(labels);
+ * ```
+ */
+export async function generateAnnotationCss(
+  labels: Record<string, AnnotationLabel>,
+  projectionOptions?: ExternalAnnotationProjectionSettings
+): Promise<string> {
+  const exports = ensureInitialized();
+
+  await yieldToMain();
+
+  const result = exports.DocumentConverter.GenerateAnnotationCss(
+    JSON.stringify(labels),
+    projectionOptions?.cssClassPrefix ?? "ext-annot-",
+    projectionOptions?.labelMode ?? AnnotationLabelMode.Above
+  );
+
+  if (isErrorResponse(result)) {
+    const error = parseError(result);
+    throw new Error(`Failed to generate annotation CSS: ${error.error}`);
+  }
+
+  const parsed = JSON.parse(result);
+  return parsed.Css ?? parsed.css;
+}
+

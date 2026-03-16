@@ -64,6 +64,9 @@ namespace DocxodusWasm;
 [JsonSerializable(typeof(Dictionary<string, AnnotationLabelDto>))]
 [JsonSerializable(typeof(TextSearchResponse))]
 [JsonSerializable(typeof(HtmlConversionResponse))]
+// Incremental annotation types
+[JsonSerializable(typeof(CssResponse))]
+[JsonSerializable(typeof(string[]))]
 // Comparison log types
 [JsonSerializable(typeof(ComparisonLogEntryDto))]
 [JsonSerializable(typeof(ComparisonLogEntryDto[]))]
@@ -1001,6 +1004,17 @@ public class HtmlConversionResponse
     /// The generated HTML content.
     /// </summary>
     public string Html { get; set; } = "";
+}
+
+/// <summary>
+/// Response containing CSS content.
+/// </summary>
+public class CssResponse
+{
+    /// <summary>
+    /// The generated CSS content.
+    /// </summary>
+    public string Css { get; set; } = "";
 }
 
 /// <summary>
