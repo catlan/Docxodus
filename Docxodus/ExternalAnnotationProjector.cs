@@ -36,13 +36,6 @@ public static class ExternalAnnotationProjector
         // Clone the document to avoid modifying the original
         var result = new XElement(htmlDocument);
 
-        // Build the text-to-element mapping
-        var textMap = BuildTextMap(result);
-        var htmlText = GetHtmlText(textMap);
-
-        // Track which offsets we've used (for handling multiple occurrences)
-        var usedOffsets = new HashSet<int>();
-
         // Sort annotations by start offset for correct nesting
         var sortedAnnotations = annotationSet.LabelledText
             .Where(a => !a.Structural && a.AnnotationJson is TextSpan)
@@ -51,7 +44,11 @@ public static class ExternalAnnotationProjector
             .ThenByDescending(x => x.Span.End) // Longer spans first for nesting
             .ToList();
 
-        // Project each annotation using text search (not offsets)
+        // Project each annotation using text search (not offsets).
+        // We rebuild the text map each iteration because projecting an annotation
+        // modifies the tree (adds wrapper + label spans), which shifts offsets.
+        // GetTextNodes skips already-projected annotation wrappers so their label
+        // text doesn't pollute the offset calculation.
         foreach (var (annotation, span) in sortedAnnotations)
         {
             var label = annotationSet.TextLabels.TryGetValue(annotation.AnnotationLabel, out var l)
@@ -61,8 +58,12 @@ public static class ExternalAnnotationProjector
             var searchText = span.Text ?? annotation.RawText;
             if (string.IsNullOrEmpty(searchText)) continue;
 
+            // Rebuild text map from current tree state (skipping already-projected spans)
+            var textMap = BuildTextMap(result);
+            var htmlText = GetHtmlText(textMap);
+
             // Find this text in the HTML
-            var htmlLocation = FindTextInHtml(htmlText, searchText, usedOffsets);
+            var htmlLocation = FindTextInHtml(htmlText, searchText, new HashSet<int>());
             if (htmlLocation == null) continue;
 
             // Create a synthetic span with HTML-space offsets
@@ -73,9 +74,6 @@ public static class ExternalAnnotationProjector
                 End = htmlLocation.Value.end,
                 Text = searchText
             };
-
-            // Rebuild text map since we may have modified it in previous iteration
-            textMap = BuildTextMap(result);
 
             ProjectSingleAnnotation(result, textMap, annotation, htmlSpan, label, settings);
         }
@@ -210,12 +208,17 @@ public static class ExternalAnnotationProjector
             {
                 // Skip script and style elements
                 var name = child.Name.LocalName.ToLowerInvariant();
-                if (name != "script" && name != "style")
+                if (name == "script" || name == "style")
+                    continue;
+
+                // Skip already-projected annotation wrappers so their label
+                // text doesn't shift offsets during subsequent projections
+                if (child.Attribute("data-annotation-id") != null)
+                    continue;
+
+                foreach (var childText in GetTextNodes(child))
                 {
-                    foreach (var childText in GetTextNodes(child))
-                    {
-                        yield return childText;
-                    }
+                    yield return childText;
                 }
             }
         }
