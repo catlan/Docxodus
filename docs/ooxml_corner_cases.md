@@ -238,13 +238,21 @@ The ECMA-376 specification clarifies how footnote numbering works:
 
 Issue #51 reported that `GetDocumentMetadata()` does not detect `w:sectPr` elements nested inside table cells or text boxes, and proposed using `body.Descendants(W.sectPr)` to find them.
 
-#### ECMA-376 Specification
+#### Why sectPr in Table Cells Should Be Ignored
 
-ECMA-376 5th Edition, Part 1, §17.6.18 (sectPr) is explicit:
+Sections are a **body-level construct** in OOXML. A section spans top-level body content and is delimited by `sectPr` in either:
+- The last paragraph's `pPr` (for mid-document sections)
+- The `body` element's trailing `sectPr` (for the final section)
 
-> "If this element is contained within the paragraph properties for a paragraph which is contained within a table cell, then the section properties shall be ignored."
+Several pieces of evidence confirm that `sectPr` inside table cells should be ignored:
 
-This means section breaks inside table cells are **not valid** — conforming applications must ignore them.
+1. **MS-OI29500 §17.7.6.1** explicitly states: "The standard states that the cnfStyle, divId, pStyle, rPr, and **sectPr** elements are valid child elements of the pPr element. **Word does not allow these elements** to be child elements of the pPr element" (in table style contexts).
+
+2. **Word's behavior**: Word does not support section breaks inside table cells. Attempting to insert one either splits the table or the break is silently ignored.
+
+3. **Structural argument**: The `w:tc` content model shares its schema with `w:body`, which is why the XML schema technically allows `sectPr` in `pPr` inside a table cell. But sections delineate page-level layout (page size, margins, columns) which cannot meaningfully apply within a table cell.
+
+**Note**: The full ISO/IEC 29500 PDF (not freely searchable online) may contain additional normative language in §17.6.17–19 about this constraint. The evidence above is from publicly accessible Microsoft implementation notes and observed Word behavior.
 
 #### Minimal XML Reproducer
 
@@ -256,7 +264,7 @@ This means section breaks inside table cells are **not valid** — conforming ap
       <w:tc>
         <w:p>
           <w:pPr>
-            <!-- This sectPr MUST be ignored per spec -->
+            <!-- This sectPr is ignored by Word -->
             <w:sectPr>
               <w:pgSz w:w="15840" w:h="12240"/>
             </w:sectPr>

@@ -662,9 +662,10 @@ namespace OxPt
         [Fact]
         public void DM070_GetDocumentMetadata_IgnoresSectPrInsideTableCells()
         {
-            // Per ECMA-376 §17.6.18: sectPr inside table cells "shall be ignored"
-            // This test verifies we correctly produce only 1 section (the body-level one),
-            // not 2, when a sectPr appears inside a table cell paragraph.
+            // Sections are body-level constructs in OOXML. Word ignores sectPr inside
+            // table cells (MS-OI29500 §17.7.6.1 notes Word disallows sectPr in table
+            // style pPr). This test verifies we correctly produce only 1 section (the
+            // body-level one), not 2, when a sectPr appears inside a table cell paragraph.
             using (var ms = new MemoryStream())
             {
                 using (var wDoc = WordprocessingDocument.Create(ms, WordprocessingDocumentType.Document))

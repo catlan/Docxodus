@@ -1101,10 +1101,11 @@ namespace Docxodus
         /// </para>
         /// <para>
         /// NOTE: sectPr elements inside tables or text boxes are intentionally NOT detected.
-        /// Per ECMA-376 5th Ed., Part 1, §17.6.18 (sectPr): "If this element is contained within
-        /// the paragraph properties for a paragraph which is contained within a table cell, then
-        /// the section properties shall be ignored." Word and LibreOffice both ignore these.
-        /// This is correct behavior, not a limitation. See GitHub issue #51 and
+        /// Sections are body-level constructs in OOXML — a section spans top-level body content
+        /// and is delimited by sectPr in the last paragraph's pPr or the body's trailing sectPr.
+        /// Word does not support section breaks inside table cells (it either splits the table
+        /// or ignores the break). MS-OI29500 §17.7.6.1 further notes that Word does not allow
+        /// sectPr as a child of pPr in table style definitions. See GitHub issue #51 and
         /// docs/ooxml_corner_cases.md for details.
         /// </para>
         /// </remarks>
