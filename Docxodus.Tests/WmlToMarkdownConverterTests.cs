@@ -31,6 +31,57 @@ public class WmlToMarkdownConverterTests
     private static WmlDocument LoadFixture(string fixtureName) =>
         new WmlDocument(Path.Combine(TestFilesDir.FullName, fixtureName));
 
+    // ----- Programmatic fixture builders (reused across phases) -----
+
+    /// <summary>Create a minimal WmlDocument with a single Normal-style paragraph.</summary>
+    private static WmlDocument BuildSimpleDoc(string text) =>
+        BuildDoc(body => body.Append(new Paragraph(new Run(new Text(text)))));
+
+    /// <summary>Create a minimal WmlDocument with a single styled-heading paragraph.</summary>
+    private static WmlDocument BuildHeadingDoc(string text, int level)
+    {
+        return BuildDoc(body =>
+        {
+            var pPr = new ParagraphProperties(new ParagraphStyleId { Val = $"Heading{level}" });
+            body.Append(new Paragraph(pPr, new Run(new Text(text))));
+        }, addHeadingStyles: true);
+    }
+
+    /// <summary>Create a minimal WmlDocument and configure its body.</summary>
+    private static WmlDocument BuildDoc(Action<Body> configureBody, bool addHeadingStyles = false)
+    {
+        using var ms = new MemoryStream();
+        using (var wDoc = WordprocessingDocument.Create(ms, WordprocessingDocumentType.Document))
+        {
+            var mainPart = wDoc.AddMainDocumentPart();
+            mainPart.Document = new Document();
+            var body = new Body();
+            mainPart.Document.Body = body;
+
+            var stylesPart = mainPart.AddNewPart<StyleDefinitionsPart>();
+            var styles = new Styles();
+            if (addHeadingStyles)
+            {
+                for (var i = 1; i <= 6; i++)
+                {
+                    styles.Append(new Style
+                    {
+                        Type = StyleValues.Paragraph,
+                        StyleId = $"Heading{i}",
+                        StyleName = new StyleName { Val = $"heading {i}" },
+                    });
+                }
+            }
+            stylesPart.Styles = styles;
+
+            mainPart.AddNewPart<DocumentSettingsPart>().Settings = new Settings();
+
+            configureBody(body);
+            mainPart.Document.Save();
+        }
+        return new WmlDocument("test.docx", ms.ToArray());
+    }
+
     // ----- Phase 1: anchor index -----
 
     [Theory]
@@ -113,5 +164,55 @@ public class WmlToMarkdownConverterTests
         Assert.Equal(
             first.AnchorIndex.Keys.OrderBy(k => k, StringComparer.Ordinal).ToArray(),
             second.AnchorIndex.Keys.OrderBy(k => k, StringComparer.Ordinal).ToArray());
+    }
+
+    // ----- Phase 2: paragraphs + headings -----
+
+    [Fact]
+    public void MD010_BodyScopeHeaderEmitted()
+    {
+        var doc = BuildSimpleDoc("Hello");
+        var p = WmlToMarkdownConverter.Convert(doc,
+            new WmlToMarkdownConverterSettings { Scopes = ProjectionScopes.Body });
+        Assert.StartsWith("# Document", p.Markdown);
+    }
+
+    [Fact]
+    public void MD011_ParagraphRendersWithAnchorOnOwnLine()
+    {
+        var doc = BuildSimpleDoc("Hello world");
+        var p = WmlToMarkdownConverter.Convert(doc, new WmlToMarkdownConverterSettings());
+        Assert.Matches(@"\{#p:body:[0-9a-f]{32}\} Hello world", p.Markdown);
+    }
+
+    [Fact]
+    public void MD012_HeadingRendersAtCorrectLevel()
+    {
+        var p1 = WmlToMarkdownConverter.Convert(BuildHeadingDoc("Title", 1),
+            new WmlToMarkdownConverterSettings());
+        Assert.Matches(@"\{#h:body:[0-9a-f]{32}\} # Title", p1.Markdown);
+
+        var p3 = WmlToMarkdownConverter.Convert(BuildHeadingDoc("Sub", 3),
+            new WmlToMarkdownConverterSettings());
+        Assert.Matches(@"\{#h:body:[0-9a-f]{32}\} ### Sub", p3.Markdown);
+    }
+
+    [Fact]
+    public void MD013_HeadingLevelOffsetApplies()
+    {
+        var doc = BuildHeadingDoc("Title", 1);
+        var p = WmlToMarkdownConverter.Convert(doc,
+            new WmlToMarkdownConverterSettings { HeadingLevelOffset = 1 });
+        Assert.Matches(@"\{#h:body:[0-9a-f]{32}\} ## Title", p.Markdown);
+    }
+
+    [Fact]
+    public void MD014_AnchorModeNoneOmitsTokens()
+    {
+        var doc = BuildSimpleDoc("Hello world");
+        var p = WmlToMarkdownConverter.Convert(doc,
+            new WmlToMarkdownConverterSettings { AnchorMode = AnchorRenderMode.None });
+        Assert.DoesNotContain("{#p:", p.Markdown);
+        Assert.Contains("Hello world", p.Markdown);
     }
 }

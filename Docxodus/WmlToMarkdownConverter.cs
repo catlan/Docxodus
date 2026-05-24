@@ -332,16 +332,117 @@ public static class WmlToMarkdownConverter
         => p.Element(W.pPr)?.Element(W.numPr) != null;
 
     // ------------------------------------------------------------------
-    // Markdown emission. Phase 1 produces an empty string; subsequent phases
-    // append to this. Implemented in this file under Phase 2+ markers below.
+    // Markdown emission. Phase 2+ implementation. Per-element handlers are
+    // dispatched by element name from EmitBlocks; the EmitContext threads the
+    // current scope name and a StringBuilder so handlers stay pure of state.
     // ------------------------------------------------------------------
+
+    private sealed class EmitContext
+    {
+        public StringBuilder Sb { get; } = new();
+        required public WmlToMarkdownConverterSettings Settings { get; init; }
+        public string Scope { get; set; } = "body";
+    }
 
     private static string EmitMarkdown(
         WordprocessingDocument document,
         WmlToMarkdownConverterSettings settings,
         List<ScopeInfo> scopes)
     {
-        // Placeholder; phases 2-7 fill this in.
-        return string.Empty;
+        var ctx = new EmitContext { Settings = settings };
+
+        var bodyScope = scopes.FirstOrDefault(s => s.Name == "body");
+        if (bodyScope != null)
+        {
+            ctx.Sb.AppendLine("# Document");
+            ctx.Sb.AppendLine();
+            ctx.Scope = "body";
+            var body = bodyScope.Root.Element(W.body);
+            if (body != null) EmitBlocks(body.Elements(), ctx);
+        }
+
+        // Phases 6+ append headers/footers/footnotes/endnotes/comments here.
+
+        return ctx.Sb.ToString();
+    }
+
+    private static void EmitBlocks(IEnumerable<XElement> blocks, EmitContext ctx)
+    {
+        foreach (var b in blocks)
+        {
+            if (b.Name == W.p) EmitParagraph(b, ctx);
+            else if (b.Name == W.tbl) EmitTable(b, ctx);
+            else if (b.Name == W.sectPr) { /* phase 6: section breaks */ }
+        }
+    }
+
+    private static void EmitParagraph(XElement p, EmitContext ctx)
+    {
+        var anchor = AnchorPrefix(p, ctx);
+
+        if (IsHeading(p))
+        {
+            var level = Math.Clamp(HeadingLevel(p) + ctx.Settings.HeadingLevelOffset, 1, 6);
+            ctx.Sb.Append(anchor);
+            ctx.Sb.Append(new string('#', level));
+            ctx.Sb.Append(' ');
+            EmitInlineRuns(p, ctx);
+            ctx.Sb.AppendLine();
+            ctx.Sb.AppendLine();
+            return;
+        }
+
+        if (IsListItem(p))
+        {
+            EmitListItem(p, ctx);
+            return;
+        }
+
+        ctx.Sb.Append(anchor);
+        EmitInlineRuns(p, ctx);
+        ctx.Sb.AppendLine();
+        ctx.Sb.AppendLine();
+    }
+
+    /// <summary>Build the anchor prefix (with trailing space) for a block element, or empty string when AnchorMode==None.</summary>
+    private static string AnchorPrefix(XElement el, EmitContext ctx)
+    {
+        if (ctx.Settings.AnchorMode == AnchorRenderMode.None) return string.Empty;
+        var kind = KindFor(el) ?? "unk";
+        var unid = (string?)el.Attribute(PtOpenXml.Unid) ?? "0";
+        return $"{{#{kind}:{ctx.Scope}:{unid}}} ";
+    }
+
+    private static int HeadingLevel(XElement p)
+    {
+        var styleId = (string?)p.Element(W.pPr)?.Element(W.pStyle)?.Attribute(W.val) ?? string.Empty;
+        if (styleId.Equals("Title", StringComparison.OrdinalIgnoreCase)) return 1;
+        if (styleId.Equals("Subtitle", StringComparison.OrdinalIgnoreCase)) return 2;
+        var digits = new string(styleId.Where(char.IsDigit).ToArray());
+        return int.TryParse(digits, out var n) && n >= 1 && n <= 6 ? n : 1;
+    }
+
+    // Phase 3 will replace this placeholder with the inline-run grouping logic. For Phase 2
+    // we emit raw text from each w:r/w:t so paragraphs and headings render their content.
+    private static void EmitInlineRuns(XElement p, EmitContext ctx)
+    {
+        foreach (var r in p.Elements(W.r))
+            foreach (var t in r.Elements(W.t))
+                ctx.Sb.Append((string)t);
+    }
+
+    // Phase 4 placeholders — fleshed out later.
+    private static void EmitListItem(XElement p, EmitContext ctx)
+    {
+        // Until Phase 4 lands, render list items the same as paragraphs but with a "-" prefix.
+        var anchor = AnchorPrefix(p, ctx);
+        ctx.Sb.Append(anchor).Append("- ");
+        EmitInlineRuns(p, ctx);
+        ctx.Sb.AppendLine();
+    }
+
+    private static void EmitTable(XElement tbl, EmitContext ctx)
+    {
+        // Phase 5 fills this in.
     }
 }
