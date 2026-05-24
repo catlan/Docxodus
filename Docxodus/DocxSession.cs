@@ -423,6 +423,55 @@ public sealed class DocxSession : IDisposable
         }
     }
 
+    // ─── Tier D: table cell content ──────────────────────────────────────
+
+    public EditResult ReplaceCellContent(string cellAnchorId, string markdownPayload)
+    {
+        if (_disposed) return EditResult.Fail(EditErrorCode.SessionDisposed, "session disposed");
+        if (!Project().AnchorIndex.TryGetValue(cellAnchorId, out var target))
+            return EditResult.Fail(EditErrorCode.AnchorNotFound, "anchor not found", cellAnchorId);
+        if (target.Anchor.Kind != "tc")
+            return EditResult.Fail(EditErrorCode.AnchorWrongKind, "ReplaceCellContent requires a cell anchor", cellAnchorId);
+
+        var parsed = Internal.MarkdownPayloadParser.Parse(markdownPayload);
+        if (!parsed.Success)
+            return EditResult.Fail(parsed.Error!.Code, parsed.Error.Message, cellAnchorId);
+
+        var cell = target.Resolve(_doc!);
+        if (cell is null) return EditResult.Fail(EditErrorCode.AnchorNotFound, "element null", cellAnchorId);
+
+        _history.RecordPreOp(TakeSnapshot());
+        try
+        {
+            foreach (var p in cell.Elements(W.p).ToList()) p.Remove();
+
+            foreach (var block in parsed.Blocks)
+            {
+                var p = BuildParagraphFromParsedBlock(block);
+                UnidHelper.AssignToAllElements(p);
+                cell.Add(p);
+                PromoteHyperlinkRelationships(p);
+            }
+            // A table cell must contain at least one paragraph per OOXML schema.
+            if (!cell.Elements(W.p).Any())
+                cell.Add(new XElement(W.p));
+
+            InvalidateProjectionCache();
+            return new EditResult
+            {
+                Success = true,
+                Modified = new[] { target.Anchor },
+                Patch = ProjectScope(target),
+            };
+        }
+        catch (Exception ex)
+        {
+            LastInternalError = ex;
+            _ = _history.PopForUndo();
+            return EditResult.Fail(EditErrorCode.InternalError, ex.Message, cellAnchorId);
+        }
+    }
+
     // ─── Tier C: formatting ──────────────────────────────────────────────
 
     public EditResult ApplyFormat(string anchorId, CharSpan? span, FormatOp op)

@@ -55,6 +55,41 @@ public class DocxSessionTests
     }
 
     /// <summary>
+    /// 2×2 table with simple text in each cell.
+    /// </summary>
+    internal static byte[] BuildDS003_TableWithCells()
+    {
+        using var ms = new MemoryStream();
+        using (var wDoc = WordprocessingDocument.Create(ms, WordprocessingDocumentType.Document))
+        {
+            var main = wDoc.AddMainDocumentPart();
+            main.Document = new Document();
+            var body = new Body();
+            main.Document.Body = body;
+            main.AddNewPart<StyleDefinitionsPart>().Styles = BuildHeadingStyles();
+            main.AddNewPart<DocumentSettingsPart>().Settings = new Settings();
+
+            var table = new DocumentFormat.OpenXml.Wordprocessing.Table();
+            for (int row = 0; row < 2; row++)
+            {
+                var tr = new DocumentFormat.OpenXml.Wordprocessing.TableRow();
+                for (int col = 0; col < 2; col++)
+                {
+                    var tc = new DocumentFormat.OpenXml.Wordprocessing.TableCell();
+                    tc.Append(new Paragraph(new Run(new Text($"R{row}C{col}"))));
+                    tr.Append(tc);
+                }
+                table.Append(tr);
+            }
+            body.Append(table);
+            body.Append(new Paragraph(new Run(new Text("After table."))));
+
+            main.Document.Save();
+        }
+        return ms.ToArray();
+    }
+
+    /// <summary>
     /// Two-item bulleted list (nested). Includes a NumberingDefinitionsPart
     /// with a single abstractNum (bullets at all levels) and a numId mapping.
     /// </summary>
@@ -463,5 +498,60 @@ public class DocxSessionTests
         var r = s.RemoveListMembership(firstLi);
         Assert.True(r.Success, r.Error?.Message);
         Assert.Contains(r.Modified, a => a.Kind == "p");
+    }
+
+    // ─── Phase 6: cell content + tracked-change mode ─────────────────────
+
+    [Fact]
+    public void DS060_ReplaceCellContent()
+    {
+        using var s = new DocxSession(BuildDS003_TableWithCells());
+        var cellAnchor = s.Project().AnchorIndex.Keys.First(k => k.StartsWith("tc:"));
+        var r = s.ReplaceCellContent(cellAnchor, "New cell text.");
+        Assert.True(r.Success, r.Error?.Message);
+        Assert.Contains("New cell text.", s.Project().Markdown);
+    }
+
+    [Fact]
+    public void DS061_ReplaceText_Tracked()
+    {
+        var settings = new DocxSessionSettings
+        {
+            TrackedChanges = TrackedChangeMode.RenderInline,
+            RevisionAuthor = "test-agent",
+        };
+        using var s = new DocxSession(BuildDS001_SimpleTwoParagraphs(), settings);
+        var anchor = s.Project().AnchorIndex.Keys.First();
+
+        var r = s.ReplaceText(anchor, "New text.");
+        Assert.True(r.Success, r.Error?.Message);
+        Assert.Contains(r.Modified, a => a.Id == anchor);
+
+        // Round-trip to byte form and inspect the XML for w:ins/w:del markers
+        var bytes = s.Save();
+        using var ms = new MemoryStream(bytes);
+        using var verify = WordprocessingDocument.Open(ms, isEditable: false);
+        var docXml = verify.MainDocumentPart!.GetXDocument().Root!.ToString();
+        Assert.Contains("w:ins", docXml);
+        Assert.Contains("w:del", docXml);
+        Assert.Contains("test-agent", docXml);
+    }
+
+    [Fact]
+    public void DS062_DeleteBlock_Tracked()
+    {
+        var settings = new DocxSessionSettings
+        {
+            TrackedChanges = TrackedChangeMode.RenderInline,
+            RevisionAuthor = "tester",
+        };
+        using var s = new DocxSession(BuildDS001_SimpleTwoParagraphs(), settings);
+        var anchor = s.Project().AnchorIndex.Keys.First();
+
+        var r = s.DeleteBlock(anchor);
+        Assert.True(r.Success, r.Error?.Message);
+        // In tracked mode, anchor stays live (modified, not removed)
+        Assert.Empty(r.Removed);
+        Assert.Contains(r.Modified, a => a.Id == anchor);
     }
 }
