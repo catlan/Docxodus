@@ -475,6 +475,114 @@ public class WmlToMarkdownConverterTests
         });
     }
 
+    // ----- Phase 6: multipart scopes -----
+
+    [Fact]
+    public void MD050_HeaderEmittedWhenPresent()
+    {
+        var doc = BuildHeaderFooterDoc(headerText: "CONFIDENTIAL", footerText: null);
+        var md = MarkdownOf(doc);
+        Assert.Contains("# Headers", md);
+        Assert.Contains("## hdr1", md);
+        Assert.Contains("CONFIDENTIAL", md);
+    }
+
+    [Fact]
+    public void MD051_FooterEmittedWhenPresent()
+    {
+        var doc = BuildHeaderFooterDoc(headerText: null, footerText: "Page 1");
+        var md = MarkdownOf(doc);
+        Assert.Contains("# Footers", md);
+        Assert.Contains("## ftr1", md);
+        Assert.Contains("Page 1", md);
+    }
+
+    [Fact]
+    public void MD052_ScopesBodyOnlySkipsOtherSections()
+    {
+        var doc = BuildHeaderFooterDoc(headerText: "H", footerText: "F");
+        var p = WmlToMarkdownConverter.Convert(doc,
+            new WmlToMarkdownConverterSettings { Scopes = ProjectionScopes.Body });
+        Assert.DoesNotContain("# Headers", p.Markdown);
+        Assert.DoesNotContain("# Footers", p.Markdown);
+    }
+
+    [Fact]
+    public void MD053_FootnoteEmittedAsGfmFootnote()
+    {
+        var doc = BuildFootnoteDoc("Body text.", "This is a footnote.");
+        var md = MarkdownOf(doc);
+        // Inline reference in the body paragraph.
+        Assert.Matches(@"\[\^fn-[0-9a-f]+\]", md);
+        // Definitions section.
+        Assert.Contains("# Footnotes", md);
+        Assert.Contains("This is a footnote.", md);
+    }
+
+    private static WmlDocument BuildHeaderFooterDoc(string? headerText, string? footerText)
+    {
+        using var ms = new MemoryStream();
+        using (var wDoc = WordprocessingDocument.Create(ms, WordprocessingDocumentType.Document))
+        {
+            var mainPart = wDoc.AddMainDocumentPart();
+            mainPart.Document = new Document();
+            var body = new Body();
+            mainPart.Document.Body = body;
+            mainPart.AddNewPart<StyleDefinitionsPart>().Styles = new Styles();
+            mainPart.AddNewPart<DocumentSettingsPart>().Settings = new Settings();
+
+            body.Append(new Paragraph(new Run(new Text("body"))));
+
+            HeaderReference? headerRef = null;
+            FooterReference? footerRef = null;
+            if (headerText != null)
+            {
+                var hp = mainPart.AddNewPart<HeaderPart>();
+                hp.Header = new Header(new Paragraph(new Run(new Text(headerText))));
+                headerRef = new HeaderReference { Id = mainPart.GetIdOfPart(hp), Type = HeaderFooterValues.Default };
+            }
+            if (footerText != null)
+            {
+                var fp = mainPart.AddNewPart<FooterPart>();
+                fp.Footer = new Footer(new Paragraph(new Run(new Text(footerText))));
+                footerRef = new FooterReference { Id = mainPart.GetIdOfPart(fp), Type = HeaderFooterValues.Default };
+            }
+            var sectPr = new SectionProperties();
+            if (headerRef != null) sectPr.Append(headerRef);
+            if (footerRef != null) sectPr.Append(footerRef);
+            body.Append(sectPr);
+
+            mainPart.Document.Save();
+        }
+        return new WmlDocument("test.docx", ms.ToArray());
+    }
+
+    private static WmlDocument BuildFootnoteDoc(string bodyText, string footnoteText)
+    {
+        using var ms = new MemoryStream();
+        using (var wDoc = WordprocessingDocument.Create(ms, WordprocessingDocumentType.Document))
+        {
+            var mainPart = wDoc.AddMainDocumentPart();
+            mainPart.Document = new Document();
+            var body = new Body();
+            mainPart.Document.Body = body;
+            mainPart.AddNewPart<StyleDefinitionsPart>().Styles = new Styles();
+            mainPart.AddNewPart<DocumentSettingsPart>().Settings = new Settings();
+
+            var fp = mainPart.AddNewPart<FootnotesPart>();
+            fp.Footnotes = new Footnotes(
+                new Footnote(new Paragraph(new Run(new Text(footnoteText)))) { Id = 1 });
+
+            var bodyPara = new Paragraph(
+                new Run(new Text(bodyText)),
+                new Run(new FootnoteReference { Id = 1 }));
+            body.Append(bodyPara);
+
+            mainPart.Document.Save();
+        }
+        return new WmlDocument("test.docx", ms.ToArray());
+    }
+
     private static WmlDocument BuildHyperlinkDoc(string text, string url)
     {
         using var ms = new MemoryStream();

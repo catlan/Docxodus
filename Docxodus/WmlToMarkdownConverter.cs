@@ -368,10 +368,121 @@ public static class WmlToMarkdownConverter
             if (body != null) EmitBlocks(body.Elements(), ctx);
         }
 
-        // Phases 6+ append headers/footers/footnotes/endnotes/comments here.
+        var headerScopes = scopes.Where(s => s.Name.StartsWith("hdr", StringComparison.Ordinal)).ToList();
+        if (headerScopes.Count > 0)
+        {
+            ctx.Sb.AppendLine("# Headers");
+            ctx.Sb.AppendLine();
+            foreach (var s in headerScopes)
+            {
+                ctx.Sb.Append("## ").AppendLine(s.Name);
+                ctx.Sb.AppendLine();
+                ctx.Scope = s.Name;
+                EmitBlocks(s.Root.Elements(), ctx);
+            }
+        }
+
+        var footerScopes = scopes.Where(s => s.Name.StartsWith("ftr", StringComparison.Ordinal)).ToList();
+        if (footerScopes.Count > 0)
+        {
+            ctx.Sb.AppendLine("# Footers");
+            ctx.Sb.AppendLine();
+            foreach (var s in footerScopes)
+            {
+                ctx.Sb.Append("## ").AppendLine(s.Name);
+                ctx.Sb.AppendLine();
+                ctx.Scope = s.Name;
+                EmitBlocks(s.Root.Elements(), ctx);
+            }
+        }
+
+        var fnScope = scopes.FirstOrDefault(s => s.Name == "fn");
+        if (fnScope != null)
+        {
+            EmitNoteDefinitions(fnScope, ctx, "Footnotes", "fn", W.footnote);
+        }
+
+        var enScope = scopes.FirstOrDefault(s => s.Name == "en");
+        if (enScope != null)
+        {
+            EmitNoteDefinitions(enScope, ctx, "Endnotes", "en", W.endnote);
+        }
+
+        var cmtScope = scopes.FirstOrDefault(s => s.Name == "cmt");
+        if (cmtScope != null)
+        {
+            EmitComments(cmtScope, ctx);
+        }
 
         return ctx.Sb.ToString();
     }
+
+    private static void EmitNoteDefinitions(ScopeInfo scope, EmitContext ctx, string header, string kindPrefix, XName elementName)
+    {
+        // The footnotes/endnotes parts always carry the separator/continuationSeparator
+        // boilerplate notes with type="separator"/type="continuationSeparator". Filter those
+        // out so only user-authored notes reach the projection.
+        var notes = scope.Root
+            .Elements(elementName)
+            .Where(n => !IsBoilerplateNote(n))
+            .ToList();
+        if (notes.Count == 0) return;
+
+        ctx.Sb.Append("# ").AppendLine(header);
+        ctx.Sb.AppendLine();
+        ctx.Scope = scope.Name;
+        foreach (var note in notes)
+        {
+            var unid = (string?)note.Attribute(PtOpenXml.Unid) ?? "0";
+            var label = $"{kindPrefix}-{ShortUnid(unid)}";
+            ctx.Sb.Append("[^").Append(label).Append("]: ");
+            // Notes contain paragraphs; flatten their text inline for the definition.
+            var first = true;
+            foreach (var p in note.Elements(W.p))
+            {
+                if (!first) ctx.Sb.Append(' ');
+                first = false;
+                EmitInlineRuns(p, ctx);
+            }
+            ctx.Sb.AppendLine();
+            ctx.Sb.AppendLine();
+        }
+    }
+
+    private static bool IsBoilerplateNote(XElement note)
+    {
+        var type = (string?)note.Attribute(W.type);
+        return type is "separator" or "continuationSeparator";
+    }
+
+    private static void EmitComments(ScopeInfo scope, EmitContext ctx)
+    {
+        var comments = scope.Root.Elements(W.comment).ToList();
+        if (comments.Count == 0) return;
+
+        ctx.Sb.AppendLine("# Comments");
+        ctx.Sb.AppendLine();
+        ctx.Scope = "cmt";
+        foreach (var c in comments)
+        {
+            var unid = (string?)c.Attribute(PtOpenXml.Unid) ?? "0";
+            var author = (string?)c.Attribute(W.author) ?? "unknown";
+            var date = (string?)c.Attribute(W.date);
+            ctx.Sb.Append($"- {{#cmt:cmt:{unid}}} **{author}**");
+            if (!string.IsNullOrEmpty(date)) ctx.Sb.Append(" (").Append(date).Append(')');
+            ctx.Sb.Append(": ");
+            foreach (var p in c.Elements(W.p))
+            {
+                EmitInlineRuns(p, ctx);
+                ctx.Sb.Append(' ');
+            }
+            ctx.Sb.AppendLine();
+        }
+        ctx.Sb.AppendLine();
+    }
+
+    private static string ShortUnid(string unid) =>
+        unid.Length >= 8 ? unid.Substring(0, 8) : unid;
 
     private static void EmitBlocks(IEnumerable<XElement> blocks, EmitContext ctx)
     {
@@ -635,7 +746,23 @@ public static class WmlToMarkdownConverter
                 ctx.Sb.Append("  \n"); // hard line break in markdown
             else if (node.Name == W.tab)
                 ctx.Sb.Append("    ");
+            else if (node.Name == W.footnoteReference)
+                AppendNoteRefMarker(node, ctx, "fn", W.footnote, ctx.Document.MainDocumentPart?.FootnotesPart);
+            else if (node.Name == W.endnoteReference)
+                AppendNoteRefMarker(node, ctx, "en", W.endnote, ctx.Document.MainDocumentPart?.EndnotesPart);
         }
+    }
+
+    private static void AppendNoteRefMarker(XElement reference, EmitContext ctx, string prefix, XName noteName, OpenXmlPart? notePart)
+    {
+        if (notePart == null) return;
+        var id = (string?)reference.Attribute(W.id);
+        if (id == null) return;
+        var note = notePart.GetXDocument().Root?.Elements(noteName)
+            .FirstOrDefault(n => (string?)n.Attribute(W.id) == id);
+        var unid = (string?)note?.Attribute(PtOpenXml.Unid);
+        if (unid == null) return;
+        ctx.Sb.Append("[^").Append(prefix).Append('-').Append(ShortUnid(unid)).Append(']');
     }
 
     private static readonly System.Text.RegularExpressions.Regex MarkdownMetaPattern =
