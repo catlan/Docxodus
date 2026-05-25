@@ -29,7 +29,13 @@ internal static class ListNumberResolver
         WordprocessingDocument doc,
         ListItemRetrieverSettings? settings = null)
     {
-        if (paragraph.Element(W.pPr)?.Element(W.numPr) == null) return null;
+        // Don't short-circuit on inline `w:numPr`: numbering can also come from a
+        // paragraph's style (the Heading1 style declaring its own numPr). The legal
+        // NVCA Model COI does exactly that for its top-level "First Article"/"Second
+        // Article" headings — they have <w:pStyle val="Heading1"/> only, no inline
+        // numPr — and the HTML converter resolves them via ListItemRetriever just
+        // fine. Letting ListItemRetriever decide (it returns null for non-list-items)
+        // keeps the projector aligned with the HTML converter — see issue #141.
         try
         {
             var resolved = ListItemRetriever.RetrieveListItem(doc, paragraph, settings ?? new ListItemRetrieverSettings());
