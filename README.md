@@ -13,7 +13,7 @@
 
 ---
 
-Docxodus is a fork of [Open-Xml-PowerTools](https://github.com/OfficeDev/Open-Xml-PowerTools) upgraded to .NET 8.0. It provides tools for comparing Word documents, converting between DOCX and HTML, merging documents, and more.
+Docxodus is a fork of [Open-Xml-PowerTools](https://github.com/OfficeDev/Open-Xml-PowerTools) upgraded to .NET 8.0. It provides tools for comparing Word documents, converting between DOCX and HTML, projecting DOCX to anchor-addressed markdown for LLM pipelines, programmatically editing DOCX content via a stateful session API, merging documents, and more.
 
 ## Quick Start
 
@@ -195,6 +195,20 @@ npx tsc --noEmit
   - Paginated output mode for PDF-like viewing
   - Headers, footers, footnotes, and endnotes support
   - Custom annotation rendering
+- **WmlToMarkdownConverter** - Anchor-addressed markdown projection of a DOCX with stable per-block IDs - a text view suitable for LLM editing pipelines, structured search indexers, and diff/review UIs
+- **DocxSession** - Stateful in-memory DOCX editor keyed by markdown-projection anchor ids - the write-side counterpart to WmlToMarkdownConverter for agentic editing pipelines
+  - Text and structural edits: replace paragraph text, delete blocks, insert/split/merge paragraphs, change paragraph style, adjust list level, replace table-cell content
+  - Character-range formatting (bold, italic, underline, strike, code, color, run style) addressed by substring, span, or a prior search match
+  - Surgical text replacement that preserves per-run formatting on either side of the rewritten slice - including a span-addressed variant that lets identical placeholders in one paragraph each receive distinct values
+  - Cross-run text search with per-fragment run breakdown (`Grep`), plus a cross-block variant (`GrepCrossBlock`) that lets a single match span adjacent paragraphs, headings, and list items
+  - Template-slot enumeration that classifies bracketed regions as value blanks, alternative clauses, or drafter hints
+  - Anchor discovery by text, regex, kind, bookmark, annotation id, or shared label - so an agent told to "edit the indemnification clause" can resolve intent to anchors without re-walking the document
+  - NBSP / smart-quote handling so common Word whitespace and punctuation don't sabotage literal find/replace
+  - Tracked-change mode that lands every mutation as `w:ins` / `w:del` instead of accepted edits
+  - Bounded snapshot undo/redo
+  - Raw OOXML escape hatch for content the markdown subset can't express (charts, equations, content controls)
+  - Typed result envelope on every call - no exceptions across the API boundary
+  - Available in .NET, WASM, and an npm TypeScript wrapper
 - **DocumentBuilder** - Merge and split DOCX files
 - **DocumentAssembler** - Template population from XML data
 - **PresentationBuilder** - Merge and split PPTX files
