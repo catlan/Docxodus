@@ -674,6 +674,7 @@ export interface DocxodusWasmExports {
     SplitParagraph: (handle: number, anchor: string, offset: number) => string;
     MergeParagraphs: (handle: number, first: string, second: string) => string;
     ApplyFormat: (handle: number, anchor: string, spanJson: string, opJson: string) => string;
+    ApplyFormatBySubstring: (handle: number, anchor: string, substring: string, opJson: string) => string;
     SetParagraphStyle: (handle: number, anchor: string, styleId: string) => string;
     SetListLevel: (handle: number, anchor: string, delta: number) => string;
     RemoveListMembership: (handle: number, anchor: string) => string;
