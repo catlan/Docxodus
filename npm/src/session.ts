@@ -221,8 +221,14 @@ export class DocxSession {
    * — handles nested brackets that surface only after the inner ones are stripped.
    *
    * The TypeScript implementation mirrors the .NET `DocxSession.FillPlaceholders`
-   * exactly. The picker is invoked synchronously inside the WASM worker; do not
-   * use it for async work or for picker logic that needs to await fetched data.
+   * exactly.
+   *
+   * The picker is invoked synchronously by this loop on the JS side (it does
+   * NOT run inside the WASM module). Async pickers are not supported: returning
+   * a `Promise` will cause a `TypeError` at runtime inside the `$`-prefix
+   * preservation branch (`Promise.startsWith is not a function`). For async
+   * data, pre-build a lookup map before calling and have the picker read from
+   * it synchronously.
    */
   fillPlaceholders(
     picker: (p: TemplatePlaceholder) => string | null | undefined,
