@@ -887,6 +887,74 @@ public class WmlToMarkdownConverterTests
         Assert.Matches(@"\{#p:body:[0-9a-f]{32}\}\s*∅", md);
     }
 
+    /// <summary>
+    /// Heading1 paragraph whose numbering comes from the STYLE (Heading1 declares
+    /// its own w:numPr) — not from any inline w:numPr on the paragraph. Mirrors
+    /// the NVCA Model COI's "First Article" / "Second Article" headings where the
+    /// markdown projector previously emitted no number prefix while the HTML
+    /// converter rendered "1." / "2." — issue #141.
+    /// </summary>
+    private static WmlDocument BuildHeadingWithStyleNumbering(string text)
+    {
+        using var ms = new MemoryStream();
+        using (var wDoc = WordprocessingDocument.Create(ms, WordprocessingDocumentType.Document))
+        {
+            var mainPart = wDoc.AddMainDocumentPart();
+            mainPart.Document = new Document();
+            var body = new Body();
+            mainPart.Document.Body = body;
+
+            var numPart = mainPart.AddNewPart<NumberingDefinitionsPart>();
+            numPart.Numbering = new Numbering(
+                new AbstractNum(
+                    new Level(
+                        new NumberingFormat { Val = NumberFormatValues.Decimal },
+                        new LevelText { Val = "%1." },
+                        new StartNumberingValue { Val = 1 })
+                    { LevelIndex = 0 })
+                { AbstractNumberId = 7 },
+                new NumberingInstance(new AbstractNumId { Val = 7 }) { NumberID = 9 });
+
+            // Heading1 style with numPr in the STYLE — exactly the NVCA pattern.
+            var stylesPart = mainPart.AddNewPart<StyleDefinitionsPart>();
+            stylesPart.Styles = new Styles(
+                new Style(
+                    new StyleName { Val = "heading 1" },
+                    new ParagraphProperties(
+                        new NumberingProperties(
+                            new NumberingLevelReference { Val = 0 },
+                            new NumberingId { Val = 9 })))
+                {
+                    Type = StyleValues.Paragraph,
+                    StyleId = "Heading1",
+                });
+
+            mainPart.AddNewPart<DocumentSettingsPart>().Settings = new Settings();
+
+            // Paragraph has ONLY <w:pStyle val="Heading1"/> — no inline numPr.
+            body.Append(new Paragraph(
+                new ParagraphProperties(new ParagraphStyleId { Val = "Heading1" }),
+                new Run(new Text(text))));
+            mainPart.Document.Save();
+        }
+        return new WmlDocument("test.docx", ms.ToArray());
+    }
+
+    [Fact]
+    public void MD033_HeadingNumberPrefix_ResolvesFromStyleLevelNumPr()
+    {
+        // Regression for #141: projector was checking inline w:numPr only and
+        // short-circuiting for style-inherited numbering. Result: NVCA Heading1
+        // paragraphs rendered as "# That the name..." with no "1." prefix, while
+        // the HTML converter rendered them with "1.". Fix: let ListItemRetriever
+        // decide (it handles style-level numPr correctly).
+        var doc = BuildHeadingWithStyleNumbering("That the name of this corporation.");
+        var md = WmlToMarkdownConverter.Convert(doc, new WmlToMarkdownConverterSettings()).Markdown;
+        Assert.Matches(
+            @"\{#h:body:[0-9a-f]{32}\} # 1\. That the name of this corporation\.",
+            md);
+    }
+
     [Fact]
     public void MD032_EmptyParagraph_Suppress_DropsFromMarkdownAndIndex()
     {
