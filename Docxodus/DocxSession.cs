@@ -226,8 +226,12 @@ public sealed record BulkEditResult
     /// (counted once per placeholder, in the first pass that saw it).</summary>
     public int Skipped { get; init; }
 
-    /// <summary>How many iteration passes ran. <c>1</c> means a single pass
-    /// converged; higher values mean multi-pass nested-bracket stripping.</summary>
+    /// <summary>The highest iteration pass that actually filled at least one
+    /// placeholder matching <see cref="FillOptions.Kinds"/>. <c>1</c> means a
+    /// single pass did all the work; higher values mean multi-pass nested-bracket
+    /// stripping or partial picker convergence. <c>0</c> means no fills happened
+    /// — either no placeholders matched at all (the scope/kinds filter returned
+    /// nothing on the first scan) or every match's picker call returned <c>null</c>.</summary>
     public int Passes { get; init; }
 
     /// <summary>Placeholders the picker returned <c>null</c> for.</summary>
@@ -1266,6 +1270,11 @@ public sealed class DocxSession : IDisposable
     /// <see cref="FillOptions.Kinds"/> includes <see cref="PlaceholderKinds.AlternativeClause"/>
     /// and the doc has nested brackets that surface only after the inner ones are stripped.
     /// Replacements within a paragraph are applied in reverse-offset order automatically.
+    /// The picker may be invoked more than once for the same logical placeholder
+    /// when <see cref="FillOptions.Kinds"/> includes <see cref="PlaceholderKinds.AlternativeClause"/>
+    /// and inner brackets are stripped between passes; pickers must therefore be
+    /// deterministic on <c>p.Match.Text</c> (return the same result for the same
+    /// input text). Non-deterministic pickers can produce inconsistent fills.
     /// </summary>
     public BulkEditResult FillPlaceholders(
         Func<TemplatePlaceholder, string?> picker,
@@ -1274,14 +1283,15 @@ public sealed class DocxSession : IDisposable
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(picker);
         var opts = options ?? new FillOptions();
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(opts.MaxPasses);
 
         int filled = 0;
-        int passes = 0;
+        int workPasses = 0;
         var errors = new List<EditError>();
         var unfilled = new List<TemplatePlaceholder>();
         var seenSkipKeys = new HashSet<(string AnchorId, int Start, int Length)>();
 
-        for (passes = 1; passes <= opts.MaxPasses; passes++)
+        for (int pass = 1; pass <= opts.MaxPasses; pass++)
         {
             var placeholders = FindPlaceholders(opts.Kinds, opts.Scope)
                 .OrderByDescending(p => p.Match.EnclosingAnchor.Anchor.Id, StringComparer.Ordinal)
@@ -1317,6 +1327,11 @@ public sealed class DocxSession : IDisposable
                 }
             }
 
+            // Record this pass only if it did real work — observation alone
+            // (placeholders found but all skipped or all errored) doesn't count.
+            if (passChanges > 0)
+                workPasses = pass;
+
             // If this pass made no changes, the picker is steady-state — stop iterating.
             if (passChanges == 0) break;
         }
@@ -1325,7 +1340,7 @@ public sealed class DocxSession : IDisposable
         {
             Filled = filled,
             Skipped = unfilled.Count,
-            Passes = passes > opts.MaxPasses ? opts.MaxPasses : passes,
+            Passes = workPasses,
             Unfilled = unfilled,
             Errors = errors,
         };

@@ -498,6 +498,29 @@ public class DocxSessionTests
         Assert.Empty(leftover);
     }
 
+    [Fact]
+    public void DS245_FillPlaceholders_MaxPassesRejectsZeroOrNegative()
+    {
+        using var session = new DocxSession(BuildDocWithBracketPlaceholders());
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            session.FillPlaceholders(_ => null, new FillOptions { MaxPasses = 0 }));
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            session.FillPlaceholders(_ => null, new FillOptions { MaxPasses = -1 }));
+    }
+
+    [Fact]
+    public void DS246_FillPlaceholders_PassesReflectsActualWorkDone()
+    {
+        // One paragraph, one [_____] placeholder. Picker fills it in pass 1.
+        // After pass 1's edit, pass 2's FindPlaceholders returns empty and breaks
+        // before recording any work. Passes should be 1, not 2.
+        using var session = new DocxSession(BuildDocWithBracketPlaceholders());
+        var result = session.FillPlaceholders(p =>
+            p.Match.Text == "[_____]" ? "FILLED" : null);
+        Assert.True(result.Filled >= 1);
+        Assert.Equal(1, result.Passes);
+    }
+
     // ─── Phase 3: text CRUD + undo/redo ──────────────────────────────────
 
     [Fact]
