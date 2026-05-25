@@ -187,6 +187,62 @@ public sealed record ReplaceOptions
 }
 
 /// <summary>
+/// Options for <see cref="DocxSession.FillPlaceholders"/>.
+/// </summary>
+public sealed record FillOptions
+{
+    /// <summary>Which placeholder kinds to fill. Defaults to <c>BlankFill | Instruction</c>
+    /// — the kinds with a single replacement value. Add <c>AlternativeClause</c> to
+    /// run the picker on bracketed clauses too (e.g. for bracket-stripping).</summary>
+    public PlaceholderKinds Kinds { get; init; } = PlaceholderKinds.BlankFill | PlaceholderKinds.Instruction;
+
+    /// <summary>Which package parts to scan. Defaults to body.</summary>
+    public ProjectionScopes Scope { get; init; } = ProjectionScopes.Body;
+
+    /// <summary>Maximum iteration passes. <see cref="DocxSession.FindPlaceholders"/> returns
+    /// innermost brackets only; stripping one layer can surface a previously-nested
+    /// outer layer, so multi-pass iteration is sometimes needed. The default of 8
+    /// is a safety cap against infinite loops on adversarial input. Set higher if
+    /// you have deeply-nested templates.</summary>
+    public int MaxPasses { get; init; } = 8;
+
+    /// <summary>When <c>true</c> (default), if the placeholder match text starts
+    /// with <c>"$"</c> (the regex <c>\$?\[…\]</c> captured a leading dollar sign)
+    /// and the picker's return value does not start with <c>"$"</c>, the dollar
+    /// is preserved by prepending it to the replacement. Set to <c>false</c> if
+    /// you want full control over the replacement and to overwrite the <c>$</c>.</summary>
+    public bool PreserveDollarPrefix { get; init; } = true;
+}
+
+/// <summary>
+/// Aggregate result envelope returned by <see cref="DocxSession.FillPlaceholders"/>.
+/// </summary>
+public sealed record BulkEditResult
+{
+    /// <summary>Number of placeholders filled by the picker.</summary>
+    public int Filled { get; init; }
+
+    /// <summary>Number of placeholders for which the picker returned <c>null</c>
+    /// (counted once per placeholder, in the first pass that saw it).</summary>
+    public int Skipped { get; init; }
+
+    /// <summary>The highest iteration pass that actually filled at least one
+    /// placeholder matching <see cref="FillOptions.Kinds"/>. <c>1</c> means a
+    /// single pass did all the work; higher values mean multi-pass nested-bracket
+    /// stripping or partial picker convergence. <c>0</c> means no fills happened
+    /// — either no placeholders matched at all (the scope/kinds filter returned
+    /// nothing on the first scan) or every match's picker call returned <c>null</c>.</summary>
+    public int Passes { get; init; }
+
+    /// <summary>Placeholders the picker returned <c>null</c> for.</summary>
+    public IReadOnlyList<TemplatePlaceholder> Unfilled { get; init; } = Array.Empty<TemplatePlaceholder>();
+
+    /// <summary>Per-replacement failures. Populated when <see cref="DocxSession.ReplaceMatch"/>
+    /// returned <c>Success = false</c> for an attempted fill.</summary>
+    public IReadOnlyList<EditError> Errors { get; init; } = Array.Empty<EditError>();
+}
+
+/// <summary>
 /// Categories of bracketed placeholders that <see cref="DocxSession.FindPlaceholders"/>
 /// recognizes. Templates routinely mix these — a real-world COI has dozens of value
 /// blanks, dozens of optional clauses, and dozens of drafter hints, all inside
@@ -229,6 +285,18 @@ public sealed record TemplatePlaceholder
     /// <c>"insert percentage"</c>; <c>"[*specify name*]"</c> → <c>"specify name"</c>).
     /// <c>null</c> for other kinds.</summary>
     public string? Hint { get; init; }
+
+    /// <summary>
+    /// Additional plausible classifications when the primary <see cref="Kind"/> is
+    /// borderline. Empty by default; populated when a secondary heuristic also
+    /// matches the placeholder text. The classic case is a long bracketed clause
+    /// that happens to contain a <c>_______</c> blank: primary <see cref="Kind"/>
+    /// is <see cref="PlaceholderKind.BlankFill"/> for back-compat, with
+    /// <see cref="PlaceholderKind.AlternativeClause"/> in <c>AlternativeKinds</c>
+    /// so callers can detect the ambiguity and treat the placeholder as a clause
+    /// (strip brackets, then fill the inner blank).
+    /// </summary>
+    public IReadOnlyList<PlaceholderKind> AlternativeKinds { get; init; } = Array.Empty<PlaceholderKind>();
 }
 
 public sealed record AnchorInfo(string Id, string Kind, string Scope, string TextPreview);
@@ -990,6 +1058,32 @@ public sealed class DocxSession : IDisposable
     }
 
     /// <summary>
+    /// Replace the bracketed portion of a <see cref="TextMatch"/> with <paramref name="newInner"/>,
+    /// preserving any prefix or suffix outside the brackets. Designed for
+    /// <see cref="FindPlaceholders"/> matches like <c>$[___]</c> where the regex
+    /// <c>\$?\[…\]</c> captures the leading <c>$</c>: <c>ReplaceInner(match, "0.20")</c>
+    /// yields <c>$0.20</c> (not <c>0.20</c>). For matches without any prefix/suffix,
+    /// this is equivalent to <see cref="ReplaceMatch"/> with the new inner value.
+    /// Returns <see cref="EditErrorCode.MalformedMarkdown"/> if the match text does
+    /// not contain balanced brackets.
+    /// </summary>
+    public EditResult ReplaceInner(TextMatch match, string newInner)
+    {
+        if (_disposed) return EditResult.Fail(EditErrorCode.SessionDisposed, "session disposed");
+        if (match is null) return EditResult.Fail(EditErrorCode.AnchorNotFound, "match is null");
+
+        int lb = match.Text.IndexOf('[');
+        int rb = match.Text.LastIndexOf(']');
+        if (lb < 0 || rb <= lb)
+            return EditResult.Fail(EditErrorCode.MalformedMarkdown,
+                $"match text has no balanced brackets: '{match.Text}'");
+
+        var prefix = match.Text[..lb];
+        var suffix = match.Text[(rb + 1)..];
+        return ReplaceMatch(match, prefix + newInner + suffix);
+    }
+
+    /// <summary>
     /// Surgical replacement of an exact byte range within one block's flat text.
     /// The natural pair to <see cref="Grep"/>: pass the <see cref="TextMatch.EnclosingAnchor"/>'s
     /// id plus the <see cref="TextMatch.Span"/> coordinates to replace one specific match
@@ -1093,7 +1187,7 @@ public sealed class DocxSession : IDisposable
         var results = new List<TemplatePlaceholder>(matches.Count);
         foreach (var m in matches)
         {
-            var classified = Classify(m.Text);
+            var (classified, alternatives) = Classify(m.Text);
             if (classified is not PlaceholderKind kind) continue;
             if (!kinds.HasFlag(KindToFlag(kind))) continue;
             results.Add(new TemplatePlaceholder
@@ -1101,11 +1195,12 @@ public sealed class DocxSession : IDisposable
                 Match = m,
                 Kind = kind,
                 Hint = kind == PlaceholderKind.Instruction ? ExtractHint(m.Text) : null,
+                AlternativeKinds = alternatives,
             });
         }
         return results;
 
-        static PlaceholderKind? Classify(string text)
+        static (PlaceholderKind? Primary, IReadOnlyList<PlaceholderKind> Alternatives) Classify(string text)
         {
             var inner = text.StartsWith('$') ? text[2..^1] : text[1..^1];
 
@@ -1114,17 +1209,37 @@ public sealed class DocxSession : IDisposable
             // slots all qualify). Tighter than "any underscore" to avoid false positives
             // on quoted identifiers like "[a_b]". Trade-off in writeup at the FindPlaceholders
             // section of docs/architecture/docx_mutation_api.md.
-            if (inner.Count(c => c == '_') >= 2) return PlaceholderKind.BlankFill;
+            bool isBlankFill = inner.Count(c => c == '_') >= 2;
 
             // Instruction: italicized (asterisk-wrapped) text, or starts with the
             // drafter verbs "insert" / "specify". Conservative leading-word check
             // so general prose in brackets doesn't mis-classify.
-            if (inner.StartsWith('*') && inner.EndsWith('*') && inner.Length > 2) return PlaceholderKind.Instruction;
-            var firstWord = inner.TakeWhile(char.IsLetter).ToArray();
-            var w = new string(firstWord).ToLowerInvariant();
-            if (w is "insert" or "specify") return PlaceholderKind.Instruction;
+            bool isInstruction = false;
+            if (inner.StartsWith('*') && inner.EndsWith('*') && inner.Length > 2) isInstruction = true;
+            else
+            {
+                var firstWord = inner.TakeWhile(char.IsLetter).ToArray();
+                var w = new string(firstWord).ToLowerInvariant();
+                if (w is "insert" or "specify") isInstruction = true;
+            }
 
-            return PlaceholderKind.AlternativeClause;
+            // Secondary classification: long-clause-with-blanks. When BlankFill fires but
+            // the inner text reads like a multi-word clause (4+ spaces between words),
+            // the placeholder is plausibly an AlternativeClause with an embedded blank.
+            // Caller can detect via AlternativeKinds and strip the outer brackets, then
+            // separately fill the inner _______ run.
+            bool looksClause = inner.Count(c => c == ' ') >= 4;
+
+            // Primary classification keeps the original priority order:
+            //   BlankFill → Instruction → AlternativeClause
+            if (isBlankFill)
+            {
+                var alts = looksClause ? new[] { PlaceholderKind.AlternativeClause } : Array.Empty<PlaceholderKind>();
+                return (PlaceholderKind.BlankFill, alts);
+            }
+            if (isInstruction)
+                return (PlaceholderKind.Instruction, Array.Empty<PlaceholderKind>());
+            return (PlaceholderKind.AlternativeClause, Array.Empty<PlaceholderKind>());
         }
 
         static string ExtractHint(string text)
@@ -1142,6 +1257,92 @@ public sealed class DocxSession : IDisposable
             PlaceholderKind.AlternativeClause => PlaceholderKinds.AlternativeClause,
             PlaceholderKind.Instruction => PlaceholderKinds.Instruction,
             _ => 0,
+        };
+    }
+
+    /// <summary>
+    /// Picker-driven template fill. For every placeholder matching
+    /// <see cref="FillOptions.Kinds"/>, calls <paramref name="picker"/>; if the picker
+    /// returns a non-null string, the placeholder is replaced (with optional
+    /// <c>$</c>-prefix preservation per <see cref="FillOptions.PreserveDollarPrefix"/>).
+    /// Iterates until no more placeholders match (or until <see cref="FillOptions.MaxPasses"/>
+    /// is reached, or a pass makes zero state changes) — important when
+    /// <see cref="FillOptions.Kinds"/> includes <see cref="PlaceholderKinds.AlternativeClause"/>
+    /// and the doc has nested brackets that surface only after the inner ones are stripped.
+    /// Replacements within a paragraph are applied in reverse-offset order automatically.
+    /// The picker may be invoked more than once for the same logical placeholder
+    /// when <see cref="FillOptions.Kinds"/> includes <see cref="PlaceholderKinds.AlternativeClause"/>
+    /// and inner brackets are stripped between passes; pickers must therefore be
+    /// deterministic on <c>p.Match.Text</c> (return the same result for the same
+    /// input text). Non-deterministic pickers can produce inconsistent fills.
+    /// </summary>
+    public BulkEditResult FillPlaceholders(
+        Func<TemplatePlaceholder, string?> picker,
+        FillOptions? options = null)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(picker);
+        var opts = options ?? new FillOptions();
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(opts.MaxPasses);
+
+        int filled = 0;
+        int workPasses = 0;
+        var errors = new List<EditError>();
+        var unfilled = new List<TemplatePlaceholder>();
+        var seenSkipKeys = new HashSet<(string AnchorId, int Start, int Length)>();
+
+        for (int pass = 1; pass <= opts.MaxPasses; pass++)
+        {
+            var placeholders = FindPlaceholders(opts.Kinds, opts.Scope)
+                .OrderByDescending(p => p.Match.EnclosingAnchor.Anchor.Id, StringComparer.Ordinal)
+                .ThenByDescending(p => p.Match.Span.Start)
+                .ToList();
+            if (placeholders.Count == 0) break;
+
+            int passChanges = 0;
+            foreach (var p in placeholders)
+            {
+                var pick = picker(p);
+                if (pick is null)
+                {
+                    // Count each skip exactly once per placeholder lifetime.
+                    var key = (p.Match.EnclosingAnchor.Anchor.Id, p.Match.Span.Start, p.Match.Span.Length);
+                    if (seenSkipKeys.Add(key))
+                        unfilled.Add(p);
+                    continue;
+                }
+
+                if (opts.PreserveDollarPrefix && p.Match.Text.StartsWith("$") && !pick.StartsWith("$"))
+                    pick = "$" + pick;
+
+                var r = ReplaceMatch(p.Match, pick);
+                if (r.Success)
+                {
+                    filled++;
+                    passChanges++;
+                }
+                else if (r.Error is { } err)
+                {
+                    errors.Add(err);
+                }
+            }
+
+            // Record this pass only if it did real work — observation alone
+            // (placeholders found but all skipped or all errored) doesn't count.
+            if (passChanges > 0)
+                workPasses = pass;
+
+            // If this pass made no changes, the picker is steady-state — stop iterating.
+            if (passChanges == 0) break;
+        }
+
+        return new BulkEditResult
+        {
+            Filled = filled,
+            Skipped = unfilled.Count,
+            Passes = workPasses,
+            Unfilled = unfilled,
+            Errors = errors,
         };
     }
 

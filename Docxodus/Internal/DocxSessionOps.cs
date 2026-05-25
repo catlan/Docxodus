@@ -91,6 +91,34 @@ internal static class DocxSessionOps
         DocxSessionJson.Serialize(
             SessionRegistry.Get(handle).ReplaceTextAtSpan(anchorId, spanStart, spanLength, replace));
 
+    /// <summary>
+    /// Bracket-aware variant of <see cref="ReplaceTextAtSpan"/>. Parses the brackets out
+    /// of <paramref name="matchText"/> and substitutes <paramref name="newInner"/> for the
+    /// bracketed portion, preserving any prefix/suffix outside the brackets (so a match
+    /// like <c>$[___]</c> + <c>"0.20"</c> produces <c>$0.20</c>, not <c>0.20</c>).
+    /// Returns a <c>MalformedMarkdown</c> EditResult if the match has no balanced
+    /// brackets. Mirrors <see cref="DocxSession.ReplaceInner(TextMatch, string)"/>;
+    /// transport-side because reconstructing a <see cref="TextMatch"/> from wire fields
+    /// (Fragments, ContextBefore, …) would be wasteful.
+    /// </summary>
+    public static string ReplaceInner(int handle, string matchText, string anchorId,
+        int spanStart, int spanLength, string newInner)
+    {
+        int lb = matchText.IndexOf('[');
+        int rb = matchText.LastIndexOf(']');
+        if (lb < 0 || rb <= lb)
+            return DocxSessionJson.Serialize(new EditResult
+            {
+                Success = false,
+                Error = new EditError(EditErrorCode.MalformedMarkdown,
+                    $"match text has no balanced brackets: '{matchText}'", anchorId),
+            });
+        var prefix = matchText[..lb];
+        var suffix = matchText[(rb + 1)..];
+        return DocxSessionJson.Serialize(
+            SessionRegistry.Get(handle).ReplaceTextAtSpan(anchorId, spanStart, spanLength, prefix + newInner + suffix));
+    }
+
     // ─── Tier B: structural ─────────────────────────────────────────────
 
     public static string InsertParagraph(int handle, string anchorId, Position position, string markdown) =>

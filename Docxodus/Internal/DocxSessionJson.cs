@@ -148,6 +148,14 @@ internal static class DocxSessionJson
         sb.Append(']');
     }
 
+    private static string KindToString(PlaceholderKind kind) => kind switch
+    {
+        PlaceholderKind.BlankFill => "blank_fill",
+        PlaceholderKind.AlternativeClause => "alternative_clause",
+        PlaceholderKind.Instruction => "instruction",
+        _ => "unknown",
+    };
+
     public static string SerializePlaceholders(IReadOnlyList<TemplatePlaceholder> placeholders)
     {
         var sb = new StringBuilder(512);
@@ -156,13 +164,14 @@ internal static class DocxSessionJson
         {
             if (i > 0) sb.Append(',');
             var p = placeholders[i];
-            sb.Append("{\"kind\":\"").Append(p.Kind switch
+            sb.Append("{\"kind\":\"").Append(KindToString(p.Kind)).Append('"');
+            sb.Append(",\"alternativeKinds\":[");
+            for (int a = 0; a < p.AlternativeKinds.Count; a++)
             {
-                PlaceholderKind.BlankFill => "blank_fill",
-                PlaceholderKind.AlternativeClause => "alternative_clause",
-                PlaceholderKind.Instruction => "instruction",
-                _ => "unknown",
-            }).Append('"');
+                if (a > 0) sb.Append(',');
+                sb.Append('"').Append(KindToString(p.AlternativeKinds[a])).Append('"');
+            }
+            sb.Append(']');
             if (p.Hint is not null)
                 sb.Append(",\"hint\":").Append(JsonString(p.Hint));
             sb.Append(",\"match\":");

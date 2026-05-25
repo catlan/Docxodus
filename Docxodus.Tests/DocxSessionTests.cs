@@ -204,6 +204,41 @@ public class DocxSessionTests
         return ms.ToArray();
     }
 
+    /// <summary>
+    /// Five-paragraph document covering the placeholder shapes that <see cref="DocxSession.FindPlaceholders"/>
+    /// recognizes — used by the template-fill convenience tests (Issue #163, units A/B/C).
+    /// Includes a leading-prefix case (<c>$[___]</c>) so tests can verify that
+    /// <see cref="DocxSession.ReplaceInner"/> preserves text outside the brackets.
+    /// </summary>
+    internal static byte[] BuildDocWithBracketPlaceholders()
+    {
+        using var ms = new MemoryStream();
+        using (var doc = WordprocessingDocument.Create(ms, WordprocessingDocumentType.Document))
+        {
+            var main = doc.AddMainDocumentPart();
+            main.Document = new Document(new Body(
+                new Paragraph(new Run(new Text("The name of this corporation is [_____]."))),
+                new Paragraph(new Run(new Text("The price per share is $[___]."))),
+                new Paragraph(new Run(new Text("Located at [____________]."))),
+                new Paragraph(new Run(new Text("[Notwithstanding the foregoing, additional terms may apply.]"))),
+                new Paragraph(new Run(new Text("[outer [inner] clause]")))));
+        }
+        return ms.ToArray();
+    }
+
+    internal static byte[] BuildDocWithLongClauseBlank()
+    {
+        using var ms = new MemoryStream();
+        using (var doc = WordprocessingDocument.Create(ms, WordprocessingDocumentType.Document))
+        {
+            var main = doc.AddMainDocumentPart();
+            main.Document = new Document(new Body(
+                new Paragraph(new Run(new Text(
+                    "[that would result in at least $_______ in gross proceeds, including or excluding proceeds previously received]")))));
+        }
+        return ms.ToArray();
+    }
+
     // ─── Phase 1: Skeleton tests ─────────────────────────────────────────
 
     [Fact]
@@ -297,6 +332,28 @@ public class DocxSessionTests
     }
 
     [Fact]
+    public void DS220b_GetAnchorInfos_DedupesAndSkipsNullIds()
+    {
+        using var session = new DocxSession(BuildDS001_SimpleTwoParagraphs());
+        var projection = session.Project();
+        var realId = projection.AnchorIndex.Values
+            .First(t => t.Anchor.Scope == "body" && t.Anchor.Kind is "p" or "h" or "li")
+            .Anchor.Id;
+
+        // Dedup: passing the same real id twice yields one entry.
+        var dupes = session.GetAnchorInfos(new[] { realId, realId, "p:body:unknown-id-xyz" });
+        Assert.Equal(2, dupes.Count);
+        Assert.True(dupes.ContainsKey(realId));
+        Assert.Null(dupes["p:body:unknown-id-xyz"]);
+
+        // Null-string skip: null strings in the input enumerable are silently skipped.
+        IEnumerable<string> withNulls = new[] { realId, null!, realId };
+        var bulkWithNulls = session.GetAnchorInfos(withNulls);
+        Assert.Single(bulkWithNulls);
+        Assert.True(bulkWithNulls.ContainsKey(realId));
+    }
+
+    [Fact]
     public void DS221_GetAnchorInfoUsesAnchorTargetTextPreview()
     {
         // Regression: after #162, GetAnchorInfo reads target.TextPreview directly
@@ -311,6 +368,179 @@ public class DocxSessionTests
             Assert.NotNull(info);
             Assert.Equal(t.TextPreview, info!.TextPreview);
         }
+    }
+
+    [Fact]
+    public void DS230_ReplaceInner_StripsBracketsKeepsPrefix()
+    {
+        using var session = new DocxSession(BuildDocWithBracketPlaceholders());
+
+        // The "$[___]" placeholder includes the leading "$" in the match (regex \$?\[…\]).
+        // ReplaceInner must keep the "$" prefix and substitute only the bracketed portion.
+        var dollarMatch = session.FindPlaceholders(PlaceholderKinds.BlankFill)
+            .Single(p => p.Match.Text.StartsWith("$["));
+
+        var r = session.ReplaceInner(dollarMatch.Match, "0.20");
+        Assert.True(r.Success);
+
+        // After replacement, the paragraph should read "The price per share is $0.20."
+        var anchorId = dollarMatch.Match.EnclosingAnchor.Anchor.Id;
+        var info = session.GetAnchorInfo(anchorId);
+        Assert.NotNull(info);
+        Assert.Equal("The price per share is $0.20.", info!.TextPreview);
+    }
+
+    [Fact]
+    public void DS231_ReplaceInner_NoBracketsReturnsError()
+    {
+        using var session = new DocxSession(BuildDocWithBracketPlaceholders());
+
+        // Pick any match, then hand-craft a TextMatch whose Text has no brackets.
+        var p = session.FindPlaceholders(PlaceholderKinds.BlankFill).First();
+        var bogus = new TextMatch
+        {
+            Text = "no brackets here",
+            EnclosingAnchor = p.Match.EnclosingAnchor,
+            Span = p.Match.Span,
+            Fragments = p.Match.Fragments,
+            ContextBefore = "",
+            ContextAfter = "",
+            Groups = Array.Empty<string>(),
+        };
+
+        var r = session.ReplaceInner(bogus, "anything");
+        Assert.False(r.Success);
+        Assert.Equal(EditErrorCode.MalformedMarkdown, r.Error?.Code);
+    }
+
+    [Fact]
+    public void DS232_Classifier_LongClauseWithUnderscoresExposesAlternativeKinds()
+    {
+        // Long bracketed clauses that contain embedded underscores are ambiguous —
+        // strictly speaking they're an AlternativeClause (a real clause), but the
+        // current classifier rule fires BlankFill because >= 2 underscores are present.
+        // Surface BOTH classifications so callers can decide.
+        using var session = new DocxSession(BuildDocWithLongClauseBlank());
+
+        var p = session.FindPlaceholders().Single();
+        Assert.Equal(PlaceholderKind.BlankFill, p.Kind);              // primary stays BlankFill (back-compat)
+        Assert.Contains(PlaceholderKind.AlternativeClause, p.AlternativeKinds);
+    }
+
+    [Fact]
+    public void DS233_Classifier_SimpleBlankFillEmptyAlternativeKinds()
+    {
+        // Plain "[_____]" placeholders are unambiguous — AlternativeKinds should be empty.
+        using var session = new DocxSession(BuildDocWithBracketPlaceholders());
+        var simpleBlankFill = session.FindPlaceholders(PlaceholderKinds.BlankFill)
+            .Single(p => p.Match.Text == "[_____]");
+        Assert.Empty(simpleBlankFill.AlternativeKinds);
+    }
+
+    [Fact]
+    public void DS240_FillPlaceholders_BlankFillPickerReplacesValue()
+    {
+        using var session = new DocxSession(BuildDocWithBracketPlaceholders());
+        var result = session.FillPlaceholders(p =>
+            p.Kind == PlaceholderKind.BlankFill && p.Match.Text == "[_____]"
+                ? "ACME, INC."
+                : null);
+        Assert.True(result.Filled >= 1);
+        Assert.Empty(result.Errors);
+
+        // Verify the first paragraph now contains "ACME, INC."
+        var projection = session.Project();
+        var firstPara = projection.AnchorIndex.Values
+            .First(t => t.Anchor.Scope == "body" && t.Anchor.Kind is "p" or "h");
+        Assert.Contains("ACME, INC.", firstPara.TextPreview);
+    }
+
+    [Fact]
+    public void DS241_FillPlaceholders_PickerReturningNullSkips()
+    {
+        using var session = new DocxSession(BuildDocWithBracketPlaceholders());
+        var result = session.FillPlaceholders(p => null);   // skip everything
+        Assert.Equal(0, result.Filled);
+        Assert.True(result.Skipped > 0);
+        Assert.NotEmpty(result.Unfilled);
+    }
+
+    [Fact]
+    public void DS242_FillPlaceholders_PreservesDollarPrefix()
+    {
+        using var session = new DocxSession(BuildDocWithBracketPlaceholders());
+        var result = session.FillPlaceholders(p =>
+            p.Match.Text.Contains("$[___]") ? "0.20" : null);
+        Assert.Equal(1, result.Filled);
+
+        // The dollar-prefixed paragraph should now read "$0.20", not "0.20" or "$$0.20".
+        var projection = session.Project();
+        var allMd = projection.Markdown;
+        Assert.Contains("$0.20", allMd);
+        Assert.DoesNotContain("$$0.20", allMd);
+    }
+
+    [Fact]
+    public void DS243_FillPlaceholders_DollarPrefixDisabled()
+    {
+        using var session = new DocxSession(BuildDocWithBracketPlaceholders());
+        var options = new FillOptions { PreserveDollarPrefix = false };
+        var result = session.FillPlaceholders(
+            p => p.Match.Text.Contains("$[___]") ? "0.20" : null,
+            options);
+        Assert.Equal(1, result.Filled);
+
+        // With PreserveDollarPrefix=false, the "$" is overwritten by the replacement.
+        var projection = session.Project();
+        Assert.Contains("share is 0.20.", projection.Markdown);
+        Assert.DoesNotContain("$0.20", projection.Markdown);
+    }
+
+    [Fact]
+    public void DS244_FillPlaceholders_AlternativeClauseMultiPassStripsNestedBrackets()
+    {
+        // The "[outer [inner] clause]" placeholder is nested; FindPlaceholders returns
+        // INNERMOST first, so stripping has to iterate. FillPlaceholders should converge
+        // after multiple passes when picker strips brackets uniformly.
+        using var session = new DocxSession(BuildDocWithBracketPlaceholders());
+        var options = new FillOptions { Kinds = PlaceholderKinds.AlternativeClause };
+        var result = session.FillPlaceholders(p =>
+        {
+            // Strip [ and ] from the match's bracketed portion, preserve any prefix/suffix.
+            var t = p.Match.Text;
+            int lb = t.IndexOf('['), rb = t.LastIndexOf(']');
+            if (lb < 0 || rb <= lb) return null;
+            return t[..lb] + t[(lb + 1)..rb] + t[(rb + 1)..];
+        }, options);
+
+        Assert.True(result.Passes >= 2);
+
+        // After convergence, no AlternativeClause matches remain.
+        var leftover = session.FindPlaceholders(PlaceholderKinds.AlternativeClause);
+        Assert.Empty(leftover);
+    }
+
+    [Fact]
+    public void DS245_FillPlaceholders_MaxPassesRejectsZeroOrNegative()
+    {
+        using var session = new DocxSession(BuildDocWithBracketPlaceholders());
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            session.FillPlaceholders(_ => null, new FillOptions { MaxPasses = 0 }));
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            session.FillPlaceholders(_ => null, new FillOptions { MaxPasses = -1 }));
+    }
+
+    [Fact]
+    public void DS246_FillPlaceholders_PassesReflectsActualWorkDone()
+    {
+        // One paragraph, one [_____] placeholder. Picker fills it in pass 1.
+        // After pass 1's edit, pass 2's FindPlaceholders returns empty and breaks
+        // before recording any work. Passes should be 1, not 2.
+        using var session = new DocxSession(BuildDocWithBracketPlaceholders());
+        var result = session.FillPlaceholders(p =>
+            p.Match.Text == "[_____]" ? "FILLED" : null);
+        Assert.True(result.Filled >= 1);
+        Assert.Equal(1, result.Passes);
     }
 
     // ─── Phase 3: text CRUD + undo/redo ──────────────────────────────────

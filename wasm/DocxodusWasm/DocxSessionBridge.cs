@@ -162,6 +162,18 @@ public static partial class DocxSessionBridge
         DocxSessionOps.ReplaceTextAtSpan(h, anchor, spanStart, spanLength, replace);
 
     /// <summary>
+    /// Bridge for <see cref="DocxSession.ReplaceInner(TextMatch, string)"/>. Takes the
+    /// match's text (so the shared core can locate the brackets) plus anchor+span (so
+    /// it can dispatch to <see cref="DocxSession.ReplaceTextAtSpan"/>). Bracket
+    /// parsing happens transport-side rather than serializing a full <see cref="TextMatch"/>
+    /// — the existing wire shape already carries text + anchor + span via Grep results,
+    /// so callers don't need anything they don't already have.
+    /// </summary>
+    [JSExport]
+    public static string ReplaceInner(int h, string matchText, string anchor, int spanStart, int spanLength, string newInner) =>
+        DocxSessionOps.ReplaceInner(h, matchText, anchor, spanStart, spanLength, newInner);
+
+    /// <summary>
     /// Bridge for <see cref="DocxSession.FindPlaceholders"/>. <paramref name="kinds"/>
     /// uses the numeric layout of <see cref="PlaceholderKinds"/> (BlankFill=1,
     /// AlternativeClause=2, Instruction=4, All=7); 0 returns nothing. <paramref name="scope"/>

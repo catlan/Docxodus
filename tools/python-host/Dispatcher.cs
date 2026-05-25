@@ -36,6 +36,9 @@ internal static class Dispatcher
             Handle(args), Str(args, "anchorId"), Str(args, "find"), Str(args, "replace"), ParseReplaceOptions(args)),
         "replace_text_at_span" => DocxSessionOps.ReplaceTextAtSpan(
             Handle(args), Str(args, "anchorId"), Int(args, "spanStart"), Int(args, "spanLength"), Str(args, "replace")),
+        "replace_inner" => DocxSessionOps.ReplaceInner(
+            Handle(args), Str(args, "matchText"), Str(args, "anchorId"),
+            Int(args, "spanStart"), Int(args, "spanLength"), Str(args, "newInner")),
 
         "insert_paragraph" => DocxSessionOps.InsertParagraph(
             Handle(args), Str(args, "anchorId"), ParsePos(args, "position"), Str(args, "markdown")),
