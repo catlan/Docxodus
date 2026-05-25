@@ -200,6 +200,38 @@ Two caveats to internalize while [#132](https://github.com/JSv4/Docxodus/issues/
 
 The agent's prompt should also be aware: it can call `AnnotationManager.GetAnnotations(doc)` once at the start of a session to enumerate available labels (e.g., "you can target: INDEMNIFICATION, TERMINATION, GOVERNING_LAW") and present those as tools rather than asking the LLM to discover them from text.
 
+## Grep — cross-run text search
+
+`session.Grep(pattern, options?, scope?, contextChars?)` searches the flat text of every paragraph/heading/list-item in scope, returning matches in document order. Each `TextMatch` carries:
+
+- `EnclosingAnchor` — the smallest block-level anchor that fully contains the match.
+- `Span` — character offset+length within the enclosing block's flat text.
+- `Fragments` — one `RunFragment` per `<w:r>` the match spans, in document order. Each fragment names the run's Unid, the slice of the match it contributes, the offset+length inside the run, and the run's visible `Formatting` (bold/italic/strike/underline/code/color/hyperlink/runStyle).
+- `ContextBefore` / `ContextAfter` — up to `contextChars` (default 40) of surrounding text from the same block.
+- `Groups` — regex capture groups.
+
+The fragment breakdown is the whole point: Word splits paragraph text into many `<w:r>` elements at every formatting boundary, so a placeholder like `[_______________]` routinely spans 2–3 runs. Without the fragment list, an agent doing search/replace has to either flatten runs (losing per-fragment formatting) or skip split matches (missing real text). `Grep` does the walk once and hands back the breakdown so callers can preserve each fragment's formatting when rewriting.
+
+### When to use
+
+```
+Need to … → use
+Find every literal/regex pattern in the doc → Grep
+Find one anchor whose text contains X → Grep, take .First().EnclosingAnchor
+Enumerate template placeholders → Grep(@"\[_+\]") or similar
+Edit text without losing formatting → Grep + a fragment-aware rewrite (see #139 for the planned ReplaceTextRange built on this)
+```
+
+### Performance
+
+~400 ms for a full-document grep over the 150 KB NVCA Model COI (~500 anchors, ~31 underscore-placeholder matches). Scales linearly with document size + match count.
+
+### Known limits
+
+- Match must fit within a single block-level element (paragraphs don't share text); cross-paragraph matches return nothing for the spanning case.
+- `RegexOptions` is the .NET enum; the npm wrapper passes its numeric value through (see `GrepOptions` in `npm/src/types.ts`).
+- Tracked-change content currently follows the projector's accepted/rendered text — `Settings.TrackedChanges = StripDeletions` won't filter `<w:del>` content out of Grep yet. Worth opening as a follow-up if it matters.
+
 ## The Raw escape hatch
 
 `session.Raw` exposes three operations: `GetXml(anchorId)` returns the element's OOXML as a string (useful as a template), `InsertXml(anchor, position, xml)` inserts a sibling fragment, `ReplaceXml(anchor, xml)` swaps the element for a fragment. Newly-inserted elements automatically get Unids and become addressable on the next projection.

@@ -107,4 +107,36 @@ test.describe('DocxSession (WASM bridge)', () => {
     expect(result.undidOk).toBe(true);
     expect(result.restored).toBe(true);
   });
+
+  test('Grep returns matches with run-fragment breakdown', async ({ page }) => {
+    const bytes = readTestFile('HC001-5DayTourPlanTemplate.docx');
+
+    const result = await page.evaluate(async (bytesArray: number[]) => {
+      const bin = new Uint8Array(bytesArray);
+      const bridge = (window as any).Docxodus.DocxSessionBridge;
+      const handle = bridge.OpenSession(bin, '');
+      try {
+        // Body scope (1) + 0 ms context.
+        const matches = JSON.parse(bridge.Grep(handle, '\\bDay\\b', JSON.stringify({ scope: 1, contextChars: 20 })));
+        const first = matches[0];
+        return {
+          count: matches.length,
+          firstText: first?.text,
+          firstHasFragments: Array.isArray(first?.fragments) && first.fragments.length >= 1,
+          firstFragmentHasUnid: typeof first?.fragments?.[0]?.unid === 'string',
+          firstFragmentHasFormatting: typeof first?.fragments?.[0]?.formatting === 'object',
+          firstContextBeforeIsString: typeof first?.contextBefore === 'string',
+        };
+      } finally {
+        bridge.CloseSession(handle);
+      }
+    }, Array.from(bytes));
+
+    expect(result.count).toBeGreaterThan(0);
+    expect(result.firstText).toBe('Day');
+    expect(result.firstHasFragments).toBe(true);
+    expect(result.firstFragmentHasUnid).toBe(true);
+    expect(result.firstFragmentHasFormatting).toBe(true);
+    expect(result.firstContextBeforeIsString).toBe(true);
+  });
 });
