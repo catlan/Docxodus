@@ -251,6 +251,18 @@ public sealed class DocxSessionSettings
     /// scenario flagged by Open Question #1 in <c>docs/architecture/markdown_projection.md</c>.
     /// </summary>
     public bool PersistAnchorIds { get; init; } = false;
+
+    /// <summary>
+    /// When <c>true</c>, <c>ReplaceText</c>/<c>ReplaceTextRange</c>/<c>ReplaceMatch</c>
+    /// payloads (and replacements passed to <c>InsertParagraph</c> / <c>ReplaceCellContent</c>)
+    /// have ASCII <c>"</c> and <c>'</c> converted to typographic curly quotes
+    /// (U+201C/U+201D and U+2018/U+2019) based on context — open quote at the start
+    /// of a string, after whitespace, or after an open-bracket; close quote elsewhere.
+    /// Avoids the cosmetic regression where a replacement lands as <c>"foo"</c> next
+    /// to surrounding <c>"foo"</c> already-curly text. Default <c>false</c> (pass payloads
+    /// through unchanged) — see issue #140.
+    /// </summary>
+    public bool SmartQuotes { get; init; } = false;
 }
 
 // ─── Session ───────────────────────────────────────────────────────────────
@@ -551,6 +563,7 @@ public sealed class DocxSession : IDisposable
             ? System.Text.RegularExpressions.RegexOptions.IgnoreCase
             : System.Text.RegularExpressions.RegexOptions.None;
         var pattern = System.Text.RegularExpressions.Regex.Escape(find);
+        replace = MaybeApplySmartQuotes(replace);
 
         var matches = Grep(pattern, regexOpts)
             .Where(m => m.EnclosingAnchor.Anchor.Id == target.Anchor.Id)
@@ -619,6 +632,8 @@ public sealed class DocxSession : IDisposable
 
         var element = target.Resolve(_doc!);
         if (element is null) return EditResult.Fail(EditErrorCode.AnchorNotFound, "element null", anchorId);
+
+        replace = MaybeApplySmartQuotes(replace);
 
         var map = Internal.RunTextMap.Build(element);
         if (spanStart < 0 || spanLength < 0 || spanStart + spanLength > map.FlatText.Length)
@@ -798,6 +813,36 @@ public sealed class DocxSession : IDisposable
     }
 
     /// <summary>
+    /// When <see cref="DocxSessionSettings.SmartQuotes"/> is on, replace ASCII <c>"</c>
+    /// and <c>'</c> with typographic curly quotes. Heuristic: open quote at the start
+    /// of the string, after whitespace, or after an open-bracket-like character;
+    /// close quote everywhere else. 1:1 character substitution preserves offsets so
+    /// downstream span math stays correct.
+    /// </summary>
+    private string MaybeApplySmartQuotes(string text)
+    {
+        if (!_settings.SmartQuotes || string.IsNullOrEmpty(text)) return text;
+        var sb = new System.Text.StringBuilder(text.Length);
+        for (int i = 0; i < text.Length; i++)
+        {
+            var c = text[i];
+            if (c != '"' && c != '\'') { sb.Append(c); continue; }
+
+            // Look at the previous character (default to "start of string" = whitespace).
+            char prev = i == 0 ? ' ' : text[i - 1];
+            bool open = char.IsWhiteSpace(prev) || prev is '(' or '[' or '{' or '<';
+
+            sb.Append(c switch
+            {
+                '"' => open ? '“' : '”',
+                '\'' => open ? '‘' : '’',
+                _ => c,
+            });
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>
     /// Maps the Unicode whitespace variants Word documents commonly use (NBSP, narrow
     /// NBSP, thin space) to ASCII space. Each substitution is one-character-for-one,
     /// so character offsets in the result map 1:1 to the input.
@@ -949,6 +994,7 @@ public sealed class DocxSession : IDisposable
         // prefix applied twice (Word renders the auto-number AND the run text now
         // begins with "Fourth"). See DS091.
         markdownPayload = StripResolvedAutoNumberPrefix(element, markdownPayload);
+        markdownPayload = MaybeApplySmartQuotes(markdownPayload);
 
         var parsed = Internal.MarkdownPayloadParser.Parse(markdownPayload);
         if (!parsed.Success)

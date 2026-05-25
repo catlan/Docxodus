@@ -772,6 +772,14 @@ export interface DocxSessionSettings {
    * only when anchor ids must survive a save/reopen round trip.
    */
   persistAnchorIds?: boolean;
+  /**
+   * When true, ReplaceText / ReplaceTextRange / ReplaceMatch payloads have ASCII
+   * `"` and `'` converted to typographic curly quotes (`“ ” ‘ ’`) based on
+   * context — open at start / after whitespace / after open-bracket, close
+   * elsewhere. Avoids the cosmetic regression where a replacement lands as
+   * straight-quoted text adjacent to surrounding already-curly text. Default false.
+   */
+  smartQuotes?: boolean;
 }
 
 export interface DocxSessionProjection {
@@ -878,6 +886,12 @@ export interface GrepOptions {
   regexOptions?: number;
   scope?: number;
   contextChars?: number;
+  /**
+   * Whitespace handling. Numeric layout matching the .NET `WhitespaceMode` enum:
+   *   - 0 = Preserve (default; match against the document's original characters)
+   *   - 1 = Normalize (fold NBSP / narrow-NBSP / thin-space to ASCII space before matching)
+   */
+  whitespace?: number;
 }
 
 /**

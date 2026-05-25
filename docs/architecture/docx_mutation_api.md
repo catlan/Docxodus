@@ -201,6 +201,23 @@ Two caveats to internalize while [#132](https://github.com/JSv4/Docxodus/issues/
 
 The agent's prompt should also be aware: it can call `AnnotationManager.GetAnnotations(doc)` once at the start of a session to enumerate available labels (e.g., "you can target: INDEMNIFICATION, TERMINATION, GOVERNING_LAW") and present those as tools rather than asking the LLM to discover them from text.
 
+## Find* helpers — anchor-level convenience over Grep
+
+For anchor-level lookups that don't need match spans / fragments:
+
+```csharp
+session.FindByText(needle, options?)              // first anchor whose text contains needle, or null
+session.FindAllByText(needle, options?)           // every anchor (deduplicated, in doc order)
+session.FindByRegex(pattern, regexOptions?, opts?)// every anchor with at least one regex match
+session.FindByKind("h", scope: "body")            // direct read over AnchorIndex, no text scan
+```
+
+`FindOptions { IgnoreCase, IgnoreWhitespace, KindFilter, ScopeFilter }`. `IgnoreWhitespace` flows down to `Grep`'s `WhitespaceMode.Normalize` so a needle written with regular spaces hits NBSP-using text — see the smoke-test trap that motivated #136 / #137.
+
+## SmartQuotes
+
+`DocxSessionSettings.SmartQuotes = true` makes every text-modifying op (`ReplaceText`, `ReplaceTextRange`, `ReplaceMatch`, `ReplaceTextAtSpan`) convert ASCII `"` and `'` in the payload to typographic curly quotes based on context — open at start/after-whitespace/after-open-bracket, close elsewhere. Avoids the cosmetic regression where a fill lands as `"foo"` next to surrounding already-curly `"foo"` text. Default off (pass payloads through unchanged).
+
 ## ApplyFormat — substring and TextMatch overloads
 
 Three entry points for character-formatting (bold/italic/underline/strike/code/color/runStyle):

@@ -1522,6 +1522,63 @@ public class DocxSessionTests
     }
 
     [Fact]
+    public void DS170_SmartQuotes_OffByDefault_PassesThrough()
+    {
+        // Default: straight quotes survive unchanged.
+        using var s = new DocxSession(BuildDS001_SimpleTwoParagraphs());
+        var anchor = s.Project().AnchorIndex.Keys.First();
+        s.ReplaceText(anchor, "Hello \"world\".");
+        Assert.Contains("\"world\"", s.Project().Markdown);
+        Assert.DoesNotContain('“', s.Project().Markdown);
+    }
+
+    [Fact]
+    public void DS171_SmartQuotes_On_DoubleQuotesBecomeCurly()
+    {
+        using var s = new DocxSession(BuildDS001_SimpleTwoParagraphs(),
+            new DocxSessionSettings { SmartQuotes = true });
+        var anchor = s.Project().AnchorIndex.Keys.First();
+        s.ReplaceText(anchor, "Hello \"world\".");
+        var md = s.Project().Markdown;
+        Assert.Contains("Hello “world”.", md);
+        Assert.DoesNotContain("\"world\"", md);
+    }
+
+    [Fact]
+    public void DS172_SmartQuotes_On_HandlesApostrophes()
+    {
+        // Mid-word ' becomes the right-single-quote (apostrophe) since the preceding
+        // char isn't whitespace/open-punct — the same rule that "close quote" follows.
+        using var s = new DocxSession(BuildDS001_SimpleTwoParagraphs(),
+            new DocxSessionSettings { SmartQuotes = true });
+        var anchor = s.Project().AnchorIndex.Keys.First();
+        s.ReplaceText(anchor, "Don't worry.");
+        Assert.Contains("Don’t worry.", s.Project().Markdown);
+    }
+
+    [Fact]
+    public void DS173_SmartQuotes_On_OpenQuoteAfterOpenBracket()
+    {
+        using var s = new DocxSession(BuildDS001_SimpleTwoParagraphs(),
+            new DocxSessionSettings { SmartQuotes = true });
+        var anchor = s.Project().AnchorIndex.Keys.First();
+        s.ReplaceText(anchor, "She said (\"hi\")");
+        Assert.Contains("She said \\(“hi”\\)", s.Project().Markdown);
+    }
+
+    [Fact]
+    public void DS174_SmartQuotes_PropagatesToReplaceTextRange()
+    {
+        // The SmartQuotes setting must apply to the surgical-edit path too,
+        // not just ReplaceText.
+        using var s = new DocxSession(BuildDS001_SimpleTwoParagraphs(),
+            new DocxSessionSettings { SmartQuotes = true });
+        var anchor = s.Project().AnchorIndex.Keys.First();
+        s.ReplaceTextRange(anchor, "First", "\"first\"");
+        Assert.Contains("“first”", s.Project().Markdown);
+    }
+
+    [Fact]
     public void DS143_DeleteBlock_Footnote_UndoRestores()
     {
         // The single-snapshot undo must roll back both the definition AND every
