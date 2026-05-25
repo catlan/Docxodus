@@ -160,6 +160,14 @@ public sealed class AnchorTarget
     required public string Unid { get; init; }
 
     /// <summary>
+    /// First ~80 characters of the element's flat text, suitable for showing in
+    /// agent context windows or UI lists. Computed during projection so agents
+    /// don't need to <see cref="Resolve"/> + re-walk the element for previews.
+    /// Empty for elements with no text (e.g. empty paragraphs, section breaks).
+    /// </summary>
+    public string TextPreview { get; init; } = string.Empty;
+
+    /// <summary>
     /// Resolves this anchor to its current <see cref="XElement"/> inside the given document.
     /// Returns null if the element has been removed since projection.
     /// </summary>
@@ -271,6 +279,16 @@ public static class WmlToMarkdownConverter
         required public XElement Root { get; init; }
     }
 
+    private const int TextPreviewMaxLength = 80;
+
+    private static string ComputeTextPreview(XElement element)
+    {
+        var text = string.Concat(element.Descendants(W.t).Select(t => (string)t));
+        return text.Length > TextPreviewMaxLength
+            ? text.Substring(0, TextPreviewMaxLength) + "…"   // "…"
+            : text;
+    }
+
     private static (IReadOnlyDictionary<string, AnchorTarget> Index, List<ScopeInfo> Scopes)
         BuildAnchorIndex(WordprocessingDocument doc, WmlToMarkdownConverterSettings settings)
     {
@@ -329,6 +347,7 @@ public static class WmlToMarkdownConverter
                     Anchor = anchor,
                     PartUri = scope.Part.Uri.ToString(),
                     Unid = unid,
+                    TextPreview = ComputeTextPreview(el),
                 };
             }
             scope.Part.PutXDocument();
