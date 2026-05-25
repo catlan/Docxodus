@@ -16,6 +16,21 @@ namespace Docxodus;
 
 public enum Position { Before, After }
 
+/// <summary>
+/// How <see cref="DocxSession.Grep"/> and the <c>FindBy*</c> helpers treat Unicode
+/// whitespace variants (NBSP, narrow NBSP, thin space) when matching. Word documents
+/// routinely use NBSP between ordinals and colons (<c>First<NBSP>:</c>) so a needle
+/// written with regular spaces silently misses without normalization — see issue #136.
+/// </summary>
+public enum WhitespaceMode
+{
+    /// <summary>Default: match against the document's original characters; NBSP stays NBSP.</summary>
+    Preserve,
+
+    /// <summary>Map U+00A0 / U+202F / U+2009 to ASCII space (U+0020) before matching.</summary>
+    Normalize,
+}
+
 public readonly record struct CharSpan(int Start, int Length);
 
 public sealed record FormatOp
@@ -95,6 +110,22 @@ public sealed record TextMatch
 
     /// <summary>Regex capture groups (index 0 is always the whole match; named groups appear at their numeric index).</summary>
     public IReadOnlyList<string> Groups { get; init; } = Array.Empty<string>();
+}
+
+/// <summary>Options that tune the <c>FindBy*</c> helpers on <see cref="DocxSession"/>.</summary>
+public sealed record FindOptions
+{
+    /// <summary>Case-insensitive matching.</summary>
+    public bool IgnoreCase { get; init; }
+
+    /// <summary>Fold NBSP / narrow-NBSP / thin-space to ASCII space before matching (see <see cref="WhitespaceMode.Normalize"/>).</summary>
+    public bool IgnoreWhitespace { get; init; }
+
+    /// <summary>If set, only return anchors of this kind (e.g. <c>"h"</c> for headings).</summary>
+    public string? KindFilter { get; init; }
+
+    /// <summary>If set, only return anchors in this scope (e.g. <c>"body"</c>, <c>"hdr1"</c>).</summary>
+    public string? ScopeFilter { get; init; }
 }
 
 /// <summary>Options that tune <see cref="DocxSession.ReplaceTextRange"/>.</summary>
@@ -220,6 +251,18 @@ public sealed class DocxSessionSettings
     /// scenario flagged by Open Question #1 in <c>docs/architecture/markdown_projection.md</c>.
     /// </summary>
     public bool PersistAnchorIds { get; init; } = false;
+
+    /// <summary>
+    /// When <c>true</c>, <c>ReplaceText</c>/<c>ReplaceTextRange</c>/<c>ReplaceMatch</c>
+    /// payloads (and replacements passed to <c>InsertParagraph</c> / <c>ReplaceCellContent</c>)
+    /// have ASCII <c>"</c> and <c>'</c> converted to typographic curly quotes
+    /// (U+201C/U+201D and U+2018/U+2019) based on context — open quote at the start
+    /// of a string, after whitespace, or after an open-bracket; close quote elsewhere.
+    /// Avoids the cosmetic regression where a replacement lands as <c>"foo"</c> next
+    /// to surrounding <c>"foo"</c> already-curly text. Default <c>false</c> (pass payloads
+    /// through unchanged) — see issue #140.
+    /// </summary>
+    public bool SmartQuotes { get; init; } = false;
 }
 
 // ─── Session ───────────────────────────────────────────────────────────────
@@ -310,7 +353,8 @@ public sealed class DocxSession : IDisposable
         string pattern,
         System.Text.RegularExpressions.RegexOptions options = System.Text.RegularExpressions.RegexOptions.None,
         ProjectionScopes scope = ProjectionScopes.Body,
-        int contextChars = 40)
+        int contextChars = 40,
+        WhitespaceMode whitespace = WhitespaceMode.Preserve)
     {
         ThrowIfDisposed();
         if (string.IsNullOrEmpty(pattern)) return Array.Empty<TextMatch>();
@@ -348,7 +392,16 @@ public sealed class DocxSession : IDisposable
             // doesn't have to walk back up to the root annotation per run.
             var ownerPart = ResolvePart(target.PartUri);
 
-            foreach (System.Text.RegularExpressions.Match m in regex.Matches(map.FlatText))
+            // For Normalize mode: match against a whitespace-normalized COPY of the
+            // flat text while keeping the segment offset map pointing at the original
+            // positions. Match indices apply unchanged because the substitutions are
+            // 1:1 (NBSP → space, narrow-NBSP → space, thin-space → space) — same
+            // character count, just different code points.
+            var matchText = whitespace == WhitespaceMode.Normalize
+                ? NormalizeWhitespace(map.FlatText)
+                : map.FlatText;
+
+            foreach (System.Text.RegularExpressions.Match m in regex.Matches(matchText))
             {
                 if (!m.Success || m.Length == 0) continue;
 
@@ -394,6 +447,81 @@ public sealed class DocxSession : IDisposable
     }
 
     /// <summary>
+    /// Finds the first anchor whose flat text contains <paramref name="needle"/>, or null.
+    /// Thin wrapper over <see cref="Grep"/> — every consumer was reimplementing the same
+    /// scan with its own quirks (case sensitivity, NBSP, scope filter). See issue #137.
+    /// </summary>
+    public AnchorTarget? FindByText(string needle, FindOptions? options = null) =>
+        FindAllByText(needle, options).FirstOrDefault();
+
+    /// <summary>
+    /// All anchors whose flat text contains <paramref name="needle"/>, in document order.
+    /// Duplicates removed (one entry per enclosing anchor regardless of how many times
+    /// the needle appears inside it).
+    /// </summary>
+    public IReadOnlyList<AnchorTarget> FindAllByText(string needle, FindOptions? options = null)
+    {
+        if (string.IsNullOrEmpty(needle)) return Array.Empty<AnchorTarget>();
+        var opts = options ?? new FindOptions();
+        var regexOpts = opts.IgnoreCase
+            ? System.Text.RegularExpressions.RegexOptions.IgnoreCase
+            : System.Text.RegularExpressions.RegexOptions.None;
+        return FindMatchesFiltered(System.Text.RegularExpressions.Regex.Escape(needle), regexOpts, opts);
+    }
+
+    /// <summary>
+    /// All anchors with at least one match for <paramref name="pattern"/>, in document order.
+    /// </summary>
+    public IReadOnlyList<AnchorTarget> FindByRegex(
+        string pattern,
+        System.Text.RegularExpressions.RegexOptions regexOptions = System.Text.RegularExpressions.RegexOptions.None,
+        FindOptions? options = null) =>
+        FindMatchesFiltered(pattern, regexOptions, options ?? new FindOptions());
+
+    /// <summary>
+    /// All anchors of a given kind (and optionally scope), in document order. Direct read
+    /// over the projection's <c>AnchorIndex</c>; no text scan, so no <see cref="FindOptions"/>.
+    /// </summary>
+    public IReadOnlyList<AnchorTarget> FindByKind(string kind, string? scope = null)
+    {
+        ThrowIfDisposed();
+        var result = new List<AnchorTarget>();
+        foreach (var target in Project().AnchorIndex.Values)
+        {
+            if (target.Anchor.Kind != kind) continue;
+            if (scope is not null && target.Anchor.Scope != scope) continue;
+            result.Add(target);
+        }
+        return result;
+    }
+
+    private IReadOnlyList<AnchorTarget> FindMatchesFiltered(
+        string pattern,
+        System.Text.RegularExpressions.RegexOptions regexOptions,
+        FindOptions options)
+    {
+        ThrowIfDisposed();
+        var matches = Grep(
+            pattern,
+            regexOptions,
+            ProjectionScopes.All, // pre-filter so caller-level filters (KindFilter, ScopeFilter) apply uniformly below
+            contextChars: 0,
+            whitespace: options.IgnoreWhitespace ? WhitespaceMode.Normalize : WhitespaceMode.Preserve);
+
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var result = new List<AnchorTarget>();
+        foreach (var m in matches)
+        {
+            var anchor = m.EnclosingAnchor;
+            if (options.KindFilter is not null && anchor.Anchor.Kind != options.KindFilter) continue;
+            if (options.ScopeFilter is not null && anchor.Anchor.Scope != options.ScopeFilter) continue;
+            if (!seen.Add(anchor.Anchor.Id)) continue;
+            result.Add(anchor);
+        }
+        return result;
+    }
+
+    /// <summary>
     /// Surgical text replacement within a single paragraph/heading/list-item: finds every
     /// literal occurrence of <paramref name="find"/> in the anchor's flat text and replaces
     /// it with <paramref name="replace"/>, preserving the surrounding run formatting that
@@ -435,6 +563,7 @@ public sealed class DocxSession : IDisposable
             ? System.Text.RegularExpressions.RegexOptions.IgnoreCase
             : System.Text.RegularExpressions.RegexOptions.None;
         var pattern = System.Text.RegularExpressions.Regex.Escape(find);
+        replace = MaybeApplySmartQuotes(replace);
 
         var matches = Grep(pattern, regexOpts)
             .Where(m => m.EnclosingAnchor.Anchor.Id == target.Anchor.Id)
@@ -503,6 +632,8 @@ public sealed class DocxSession : IDisposable
 
         var element = target.Resolve(_doc!);
         if (element is null) return EditResult.Fail(EditErrorCode.AnchorNotFound, "element null", anchorId);
+
+        replace = MaybeApplySmartQuotes(replace);
 
         var map = Internal.RunTextMap.Build(element);
         if (spanStart < 0 || spanLength < 0 || spanStart + spanLength > map.FlatText.Length)
@@ -681,6 +812,58 @@ public sealed class DocxSession : IDisposable
         }
     }
 
+    /// <summary>
+    /// When <see cref="DocxSessionSettings.SmartQuotes"/> is on, replace ASCII <c>"</c>
+    /// and <c>'</c> with typographic curly quotes. Heuristic: open quote at the start
+    /// of the string, after whitespace, or after an open-bracket-like character;
+    /// close quote everywhere else. 1:1 character substitution preserves offsets so
+    /// downstream span math stays correct.
+    /// </summary>
+    private string MaybeApplySmartQuotes(string text)
+    {
+        if (!_settings.SmartQuotes || string.IsNullOrEmpty(text)) return text;
+        var sb = new System.Text.StringBuilder(text.Length);
+        for (int i = 0; i < text.Length; i++)
+        {
+            var c = text[i];
+            if (c != '"' && c != '\'') { sb.Append(c); continue; }
+
+            // Look at the previous character (default to "start of string" = whitespace).
+            char prev = i == 0 ? ' ' : text[i - 1];
+            bool open = char.IsWhiteSpace(prev) || prev is '(' or '[' or '{' or '<';
+
+            sb.Append(c switch
+            {
+                '"' => open ? '“' : '”',
+                '\'' => open ? '‘' : '’',
+                _ => c,
+            });
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Maps the Unicode whitespace variants Word documents commonly use (NBSP, narrow
+    /// NBSP, thin space) to ASCII space. Each substitution is one-character-for-one,
+    /// so character offsets in the result map 1:1 to the input.
+    /// </summary>
+    private static string NormalizeWhitespace(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return text;
+        var sb = new System.Text.StringBuilder(text.Length);
+        foreach (var c in text)
+        {
+            sb.Append(c switch
+            {
+                ' ' => ' ', // non-breaking space
+                ' ' => ' ', // narrow no-break space
+                ' ' => ' ', // thin space
+                _ => c,
+            });
+        }
+        return sb.ToString();
+    }
+
     private static bool ScopeMatches(string anchorScope, ProjectionScopes filter)
     {
         // Anchor scopes are strings ("body", "hdr1", "ftr2", "fn", "en", "cmt").
@@ -811,6 +994,7 @@ public sealed class DocxSession : IDisposable
         // prefix applied twice (Word renders the auto-number AND the run text now
         // begins with "Fourth"). See DS091.
         markdownPayload = StripResolvedAutoNumberPrefix(element, markdownPayload);
+        markdownPayload = MaybeApplySmartQuotes(markdownPayload);
 
         var parsed = Internal.MarkdownPayloadParser.Parse(markdownPayload);
         if (!parsed.Success)

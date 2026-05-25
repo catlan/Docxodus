@@ -1395,6 +1395,189 @@ public class DocxSessionTests
         Assert.DoesNotContain("commentRangeEnd", bodyXml);
     }
 
+    // ─── Phase 15: WhitespaceMode + FindBy helpers + SmartQuotes (#136/#137/#140) ────
+
+    /// <summary>Single body paragraph where the only whitespace between "First" and ":" is a NBSP.</summary>
+    internal static byte[] BuildDS150_NbspFixture()
+    {
+        XNamespace W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+        using var ms = new MemoryStream();
+        using (var wDoc = WordprocessingDocument.Create(ms, WordprocessingDocumentType.Document))
+        {
+            var main = wDoc.AddMainDocumentPart();
+            main.AddNewPart<StyleDefinitionsPart>().Styles = BuildHeadingStyles();
+            main.AddNewPart<DocumentSettingsPart>().Settings = new Settings();
+
+            // The whitespace between "First" and ":" is a NON-BREAKING SPACE (U+00A0) —
+            // exactly what NVCA legal templates use for ordinal: headings. Written as an
+            // explicit escape so the source character isn't lost in editor round trips.
+            var body = new XElement(W + "body",
+                new XElement(W + "p",
+                    new XElement(W + "r",
+                        new XElement(W + "t", new XAttribute(XNamespace.Xml + "space", "preserve"),
+                            "First\u00A0: The name of this corporation."))));
+            main.PutXDocument(new XDocument(new XElement(W + "document",
+                new XAttribute(XNamespace.Xmlns + "w", W.NamespaceName),
+                body)));
+        }
+        return ms.ToArray();
+    }
+
+    [Fact]
+    public void DS150_Grep_WhitespacePreserve_DoesNotMatchSpaceWhenSourceIsNbsp()
+    {
+        // Default behavior: NBSP is preserved as-is, so a needle with regular space misses.
+        using var s = new DocxSession(BuildDS150_NbspFixture());
+        var matches = s.Grep("First :");
+        Assert.Empty(matches);
+    }
+
+    [Fact]
+    public void DS151_Grep_WhitespaceNormalize_MatchesSpaceWhenSourceIsNbsp()
+    {
+        // Normalize mode: NBSP folds to regular space so the needle hits.
+        using var s = new DocxSession(BuildDS150_NbspFixture());
+        var matches = s.Grep(
+            "First :",
+            scope: ProjectionScopes.Body,
+            whitespace: WhitespaceMode.Normalize);
+        Assert.Single(matches);
+        Assert.Equal("First :", matches[0].Text);
+    }
+
+    [Fact]
+    public void DS152_Grep_WhitespaceNormalize_FragmentSpansPointAtOriginalText()
+    {
+        // Critical correctness check: even though we MATCHED on the normalized text,
+        // the returned Span must address the same character positions in the original.
+        // Otherwise a follow-up ReplaceMatch would land in the wrong place.
+        using var s = new DocxSession(BuildDS150_NbspFixture());
+        var m = s.Grep("First :", whitespace: WhitespaceMode.Normalize).Single();
+
+        var r = s.ReplaceMatch(m, "Section 1 :");
+        Assert.True(r.Success, r.Error?.Message);
+        Assert.Contains("Section 1 : The name of this corporation.", s.Project().Markdown);
+    }
+
+    [Fact]
+    public void DS160_FindByText_FirstMatch()
+    {
+        using var s = new DocxSession(BuildDS100_GrepFixture());
+        var t = s.FindByText("BOLD");
+        Assert.NotNull(t);
+        Assert.Equal("p", t!.Anchor.Kind);
+    }
+
+    [Fact]
+    public void DS161_FindByText_IgnoreCase()
+    {
+        using var s = new DocxSession(BuildDS100_GrepFixture());
+        Assert.Null(s.FindByText("bold"));  // case-sensitive default misses uppercase BOLD
+        Assert.NotNull(s.FindByText("bold", new FindOptions { IgnoreCase = true }));
+    }
+
+    [Fact]
+    public void DS162_FindByText_IgnoreWhitespace_HandlesNbsp()
+    {
+        using var s = new DocxSession(BuildDS150_NbspFixture());
+        Assert.Null(s.FindByText("First :"));  // NBSP in source, regular space in needle
+        Assert.NotNull(s.FindByText("First :", new FindOptions { IgnoreWhitespace = true }));
+    }
+
+    [Fact]
+    public void DS163_FindAllByText_ReturnsDeduplicatedAnchorsInDocumentOrder()
+    {
+        // The Grep fixture has 3 paragraphs that all contain lowercase "n" ("Once"/"in"/
+        // "Plain"/"again"/"Anthropic"); FindAllByText must collapse the many in-paragraph
+        // hits into one entry per paragraph.
+        using var s = new DocxSession(BuildDS100_GrepFixture());
+        var all = s.FindAllByText("n");
+        Assert.Equal(3, all.Count);
+        Assert.Equal(all.Count, all.Select(a => a.Anchor.Id).Distinct().Count());
+    }
+
+    [Fact]
+    public void DS164_FindByRegex_ReturnsAllMatchingAnchors()
+    {
+        using var s = new DocxSession(BuildDS100_GrepFixture());
+        var anchors = s.FindByRegex(@"\b\w*BOLD\w*\b");
+        Assert.NotEmpty(anchors);
+    }
+
+    [Fact]
+    public void DS165_FindByKind_FiltersByKindAndScope()
+    {
+        using var s = new DocxSession(BuildDS001_SimpleTwoParagraphs());
+        Assert.Equal(2, s.FindByKind("p", "body").Count);
+        Assert.Empty(s.FindByKind("p", "hdr1"));
+        Assert.True(s.FindByKind("p").Count >= 2);
+    }
+
+    [Fact]
+    public void DS166_FindOptions_KindFilter_Narrows()
+    {
+        using var s = new DocxSession(BuildDS100_GrepFixture());
+        var headingsOnly = s.FindAllByText("n", new FindOptions { KindFilter = "h" });
+        Assert.All(headingsOnly, a => Assert.Equal("h", a.Anchor.Kind));
+    }
+
+    [Fact]
+    public void DS170_SmartQuotes_OffByDefault_PassesThrough()
+    {
+        // Default: straight quotes survive unchanged.
+        using var s = new DocxSession(BuildDS001_SimpleTwoParagraphs());
+        var anchor = s.Project().AnchorIndex.Keys.First();
+        s.ReplaceText(anchor, "Hello \"world\".");
+        Assert.Contains("\"world\"", s.Project().Markdown);
+        Assert.DoesNotContain('“', s.Project().Markdown);
+    }
+
+    [Fact]
+    public void DS171_SmartQuotes_On_DoubleQuotesBecomeCurly()
+    {
+        using var s = new DocxSession(BuildDS001_SimpleTwoParagraphs(),
+            new DocxSessionSettings { SmartQuotes = true });
+        var anchor = s.Project().AnchorIndex.Keys.First();
+        s.ReplaceText(anchor, "Hello \"world\".");
+        var md = s.Project().Markdown;
+        Assert.Contains("Hello “world”.", md);
+        Assert.DoesNotContain("\"world\"", md);
+    }
+
+    [Fact]
+    public void DS172_SmartQuotes_On_HandlesApostrophes()
+    {
+        // Mid-word ' becomes the right-single-quote (apostrophe) since the preceding
+        // char isn't whitespace/open-punct — the same rule that "close quote" follows.
+        using var s = new DocxSession(BuildDS001_SimpleTwoParagraphs(),
+            new DocxSessionSettings { SmartQuotes = true });
+        var anchor = s.Project().AnchorIndex.Keys.First();
+        s.ReplaceText(anchor, "Don't worry.");
+        Assert.Contains("Don’t worry.", s.Project().Markdown);
+    }
+
+    [Fact]
+    public void DS173_SmartQuotes_On_OpenQuoteAfterOpenBracket()
+    {
+        using var s = new DocxSession(BuildDS001_SimpleTwoParagraphs(),
+            new DocxSessionSettings { SmartQuotes = true });
+        var anchor = s.Project().AnchorIndex.Keys.First();
+        s.ReplaceText(anchor, "She said (\"hi\")");
+        Assert.Contains("She said \\(“hi”\\)", s.Project().Markdown);
+    }
+
+    [Fact]
+    public void DS174_SmartQuotes_PropagatesToReplaceTextRange()
+    {
+        // The SmartQuotes setting must apply to the surgical-edit path too,
+        // not just ReplaceText.
+        using var s = new DocxSession(BuildDS001_SimpleTwoParagraphs(),
+            new DocxSessionSettings { SmartQuotes = true });
+        var anchor = s.Project().AnchorIndex.Keys.First();
+        s.ReplaceTextRange(anchor, "First", "\"first\"");
+        Assert.Contains("“first”", s.Project().Markdown);
+    }
+
     [Fact]
     public void DS143_DeleteBlock_Footnote_UndoRestores()
     {

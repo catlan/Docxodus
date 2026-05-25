@@ -124,6 +124,7 @@ public static partial class DocxSessionBridge
         var regexOpts = System.Text.RegularExpressions.RegexOptions.None;
         var scope = ProjectionScopes.Body;
         var contextChars = 40;
+        var whitespace = WhitespaceMode.Preserve;
         if (!string.IsNullOrEmpty(optionsJson))
         {
             using var doc = JsonDocument.Parse(optionsJson);
@@ -134,8 +135,10 @@ public static partial class DocxSessionBridge
                 scope = (ProjectionScopes)s.GetInt32();
             if (root.TryGetProperty("contextChars", out var c) && c.ValueKind == JsonValueKind.Number)
                 contextChars = c.GetInt32();
+            if (root.TryGetProperty("whitespace", out var w) && w.ValueKind == JsonValueKind.Number)
+                whitespace = (WhitespaceMode)w.GetInt32();
         }
-        return SerializeMatches(Get(h).Grep(pattern, regexOpts, scope, contextChars));
+        return SerializeMatches(Get(h).Grep(pattern, regexOpts, scope, contextChars, whitespace));
     }
 
     /// <summary>
@@ -221,6 +224,7 @@ public static partial class DocxSessionBridge
         };
         var revisionAuthor = TryGetString(root, "revisionAuthor", null);
         bool persistAnchorIds = TryGetBool(root, "persistAnchorIds", false);
+        bool smartQuotes = TryGetBool(root, "smartQuotes", false);
         return new DocxSessionSettings
         {
             UndoDepth = undoDepth,
@@ -228,6 +232,7 @@ public static partial class DocxSessionBridge
             TrackedChanges = tracked,
             RevisionAuthor = revisionAuthor,
             PersistAnchorIds = persistAnchorIds,
+            SmartQuotes = smartQuotes,
         };
     }
 
