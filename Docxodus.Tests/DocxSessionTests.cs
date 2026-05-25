@@ -1220,6 +1220,208 @@ public class DocxSessionTests
         Assert.Equal(EditErrorCode.OffsetOutOfRange, r.Error!.Code);
     }
 
+    // ─── Phase 14: DeleteBlock for fn/en/cmt (#133) ──────────────────────
+
+    /// <summary>
+    /// Single-paragraph body with a footnote reference (id=1) plus a Footnotes part
+    /// containing the required Word-reserved separators (id=-1, id=0) AND a user
+    /// footnote (id=1) the test will delete.
+    /// </summary>
+    internal static byte[] BuildDS140_FootnoteFixture()
+    {
+        using var ms = new MemoryStream();
+        using (var wDoc = WordprocessingDocument.Create(ms, WordprocessingDocumentType.Document))
+        {
+            var main = wDoc.AddMainDocumentPart();
+            main.Document = new Document();
+            main.AddNewPart<StyleDefinitionsPart>().Styles = BuildHeadingStyles();
+            main.AddNewPart<DocumentSettingsPart>().Settings = new Settings();
+
+            var footnotesPart = main.AddNewPart<FootnotesPart>();
+            footnotesPart.Footnotes = new Footnotes(
+                new Footnote(new Paragraph(new Run(new FootnoteReferenceMark()))) { Type = FootnoteEndnoteValues.Separator, Id = -1 },
+                new Footnote(new Paragraph(new Run(new ContinuationSeparatorMark()))) { Type = FootnoteEndnoteValues.ContinuationSeparator, Id = 0 },
+                new Footnote(new Paragraph(new Run(new Text("This footnote will be deleted.")))) { Type = FootnoteEndnoteValues.Normal, Id = 1 });
+            footnotesPart.Footnotes.Save();
+
+            var body = new Body();
+            main.Document.Body = body;
+            body.Append(new Paragraph(
+                new Run(new Text("Main text") { Space = SpaceProcessingModeValues.Preserve }),
+                new Run(new FootnoteReference() { Id = 1 }),
+                new Run(new Text(" continued.") { Space = SpaceProcessingModeValues.Preserve })));
+            main.Document.Save();
+        }
+        return ms.ToArray();
+    }
+
+    internal static byte[] BuildDS141_EndnoteFixture()
+    {
+        using var ms = new MemoryStream();
+        using (var wDoc = WordprocessingDocument.Create(ms, WordprocessingDocumentType.Document))
+        {
+            var main = wDoc.AddMainDocumentPart();
+            main.Document = new Document();
+            main.AddNewPart<StyleDefinitionsPart>().Styles = BuildHeadingStyles();
+            main.AddNewPart<DocumentSettingsPart>().Settings = new Settings();
+
+            var endnotesPart = main.AddNewPart<EndnotesPart>();
+            endnotesPart.Endnotes = new Endnotes(
+                new Endnote(new Paragraph(new Run(new FootnoteReferenceMark()))) { Type = FootnoteEndnoteValues.Separator, Id = -1 },
+                new Endnote(new Paragraph(new Run(new ContinuationSeparatorMark()))) { Type = FootnoteEndnoteValues.ContinuationSeparator, Id = 0 },
+                new Endnote(new Paragraph(new Run(new Text("This endnote will be deleted.")))) { Type = FootnoteEndnoteValues.Normal, Id = 1 });
+            endnotesPart.Endnotes.Save();
+
+            var body = new Body();
+            main.Document.Body = body;
+            body.Append(new Paragraph(
+                new Run(new Text("Body text") { Space = SpaceProcessingModeValues.Preserve }),
+                new Run(new EndnoteReference() { Id = 1 })));
+            main.Document.Save();
+        }
+        return ms.ToArray();
+    }
+
+    internal static byte[] BuildDS142_CommentFixture()
+    {
+        using var ms = new MemoryStream();
+        using (var wDoc = WordprocessingDocument.Create(ms, WordprocessingDocumentType.Document))
+        {
+            var main = wDoc.AddMainDocumentPart();
+            main.Document = new Document();
+            main.AddNewPart<StyleDefinitionsPart>().Styles = BuildHeadingStyles();
+            main.AddNewPart<DocumentSettingsPart>().Settings = new Settings();
+
+            var commentsPart = main.AddNewPart<WordprocessingCommentsPart>();
+            commentsPart.Comments = new Comments(
+                new Comment(new Paragraph(new Run(new Text("This comment will be deleted."))))
+                {
+                    Id = "1", Initials = "TC", Author = "Test", Date = System.DateTime.UtcNow,
+                });
+            commentsPart.Comments.Save();
+
+            var body = new Body();
+            main.Document.Body = body;
+            body.Append(new Paragraph(
+                new CommentRangeStart() { Id = "1" },
+                new Run(new Text("Body text") { Space = SpaceProcessingModeValues.Preserve }),
+                new CommentRangeEnd() { Id = "1" },
+                new Run(new CommentReference() { Id = "1" })));
+            main.Document.Save();
+        }
+        return ms.ToArray();
+    }
+
+    /// <summary>True iff the anchor's serialized XML contains <paramref name="snippet"/>.</summary>
+    private static bool AnchorXmlContains(DocxSession s, string anchorId, string snippet) =>
+        s.Raw.GetXml(anchorId).Contains(snippet, System.StringComparison.Ordinal);
+
+    [Fact]
+    public void DS140_DeleteBlock_Footnote_RemovesDefinitionAndBodyReference()
+    {
+        using var s = new DocxSession(BuildDS140_FootnoteFixture());
+
+        // Find specifically the user footnote (the only one with "will be deleted" text;
+        // the two separator footnotes don't have user text).
+        var userFootnote = s.Project().AnchorIndex.Values
+            .Single(t => t.Anchor.Kind == "fn"
+                      && AnchorXmlContains(s, t.Anchor.Id, "will be deleted"));
+
+        var r = s.DeleteBlock(userFootnote.Anchor.Id);
+        Assert.True(r.Success, r.Error?.Message);
+
+        // Both the definition and the body's <w:footnoteReference w:id="1"/> are gone.
+        var saved = s.Save();
+        using var d = WordprocessingDocument.Open(new MemoryStream(saved), false);
+        var bodyXml = d.MainDocumentPart!.GetXDocument().Root!.ToString();
+        Assert.DoesNotContain("footnoteReference", bodyXml);
+        if (d.MainDocumentPart.FootnotesPart is not null)
+        {
+            var fnXml = d.MainDocumentPart.FootnotesPart.GetXDocument().Root!.ToString();
+            Assert.DoesNotContain("This footnote will be deleted", fnXml);
+        }
+    }
+
+    [Fact]
+    public void DS140b_DeleteBlock_Footnote_RefusesSeparator()
+    {
+        // Word's id=-1 (separator) and id=0 (continuationSeparator) footnotes are
+        // page-rendering scaffolding — deleting them corrupts the document. The op
+        // must refuse with AnchorWrongKind.
+        using var s = new DocxSession(BuildDS140_FootnoteFixture());
+        var separator = s.Project().AnchorIndex.Values
+            .First(t => t.Anchor.Kind == "fn"
+                     && AnchorXmlContains(s, t.Anchor.Id, "w:type=\"separator\""));
+
+        var r = s.DeleteBlock(separator.Anchor.Id);
+        Assert.False(r.Success);
+        Assert.Equal(EditErrorCode.AnchorWrongKind, r.Error!.Code);
+    }
+
+    [Fact]
+    public void DS141_DeleteBlock_Endnote_RemovesDefinitionAndBodyReference()
+    {
+        using var s = new DocxSession(BuildDS141_EndnoteFixture());
+        var userEndnote = s.Project().AnchorIndex.Values
+            .Single(t => t.Anchor.Kind == "en"
+                      && AnchorXmlContains(s, t.Anchor.Id, "will be deleted"));
+
+        var r = s.DeleteBlock(userEndnote.Anchor.Id);
+        Assert.True(r.Success, r.Error?.Message);
+
+        var saved = s.Save();
+        using var d = WordprocessingDocument.Open(new MemoryStream(saved), false);
+        var bodyXml = d.MainDocumentPart!.GetXDocument().Root!.ToString();
+        Assert.DoesNotContain("endnoteReference", bodyXml);
+    }
+
+    [Fact]
+    public void DS142_DeleteBlock_Comment_RemovesDefinitionAndAllRangeMarkers()
+    {
+        using var s = new DocxSession(BuildDS142_CommentFixture());
+        var comment = s.Project().AnchorIndex.Values
+            .Single(t => t.Anchor.Kind == "cmt" && t.Anchor.Scope == "cmt");
+
+        var r = s.DeleteBlock(comment.Anchor.Id);
+        Assert.True(r.Success, r.Error?.Message);
+
+        var saved = s.Save();
+        using var d = WordprocessingDocument.Open(new MemoryStream(saved), false);
+        var bodyXml = d.MainDocumentPart!.GetXDocument().Root!.ToString();
+        // All three comment markers (commentReference, commentRangeStart, commentRangeEnd)
+        // must be gone — leaving any of them behind makes Word render a broken marker.
+        Assert.DoesNotContain("commentReference", bodyXml);
+        Assert.DoesNotContain("commentRangeStart", bodyXml);
+        Assert.DoesNotContain("commentRangeEnd", bodyXml);
+    }
+
+    [Fact]
+    public void DS143_DeleteBlock_Footnote_UndoRestores()
+    {
+        // The single-snapshot undo must roll back both the definition AND every
+        // cross-reference that was stripped in one shot.
+        using var s = new DocxSession(BuildDS140_FootnoteFixture());
+        var userFootnote = s.Project().AnchorIndex.Values
+            .Single(t => t.Anchor.Kind == "fn"
+                      && AnchorXmlContains(s, t.Anchor.Id, "will be deleted"));
+
+        var savedBefore = s.Save();
+        var delResult = s.DeleteBlock(userFootnote.Anchor.Id);
+        Assert.True(delResult.Success, delResult.Error?.Message);
+        Assert.True(s.Undo(), "Undo should restore the pre-delete state");
+        var savedAfterUndo = s.Save();
+
+        // Undo restores both the definition AND the in-body reference.
+        using var dBefore = WordprocessingDocument.Open(new MemoryStream(savedBefore), false);
+        using var dAfter = WordprocessingDocument.Open(new MemoryStream(savedAfterUndo), false);
+        var bodyBefore = dBefore.MainDocumentPart!.GetXDocument().Root!.ToString();
+        var bodyAfter = dAfter.MainDocumentPart!.GetXDocument().Root!.ToString();
+        Assert.Contains("footnoteReference", bodyAfter);
+        Assert.Equal(
+            System.Text.RegularExpressions.Regex.Matches(bodyBefore, "footnoteReference").Count,
+            System.Text.RegularExpressions.Regex.Matches(bodyAfter, "footnoteReference").Count);
+    }
+
     [Fact]
     public void DS132_ApplyFormat_FromTextMatch_AddressesExactSpan()
     {

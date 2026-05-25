@@ -851,18 +851,34 @@ public sealed class DocxSession : IDisposable
         var target = FindAnchor(anchorId);
         if (target is null)
             return EditResult.Fail(EditErrorCode.AnchorNotFound, $"anchor not found: {anchorId}", anchorId);
-        if (target.Anchor.Kind is not ("p" or "h" or "li" or "tbl"))
+        if (target.Anchor.Kind is not ("p" or "h" or "li" or "tbl" or "fn" or "en" or "cmt"))
             return EditResult.Fail(EditErrorCode.AnchorWrongKind,
-                $"DeleteBlock requires a block-level anchor; got kind={target.Anchor.Kind}", anchorId);
+                $"DeleteBlock requires a block-level/footnote/endnote/comment anchor; got kind={target.Anchor.Kind}", anchorId);
 
         var element = target.Resolve(_doc!);
         if (element is null)
             return EditResult.Fail(EditErrorCode.AnchorNotFound, "element resolved null", anchorId);
 
+        // Word reserves a couple of footnote/endnote definitions (the "separator" and
+        // "continuationSeparator" types) for page-rendering scaffolding; they have no
+        // user-content meaning and removing them corrupts the doc. Refuse explicitly.
+        if (target.Anchor.Kind is "fn" or "en")
+        {
+            var typeAttr = (string?)element.Attribute(W.type);
+            if (typeAttr is "separator" or "continuationSeparator")
+                return EditResult.Fail(EditErrorCode.AnchorWrongKind,
+                    $"cannot delete a Word-reserved {target.Anchor.Kind} of type='{typeAttr}'", anchorId);
+        }
+
         _history.RecordPreOp(TakeSnapshot());
         try
         {
-            if (_settings.TrackedChanges == TrackedChangeMode.RenderInline)
+            // Tracked-change mode wraps removed runs in w:del — only meaningful for
+            // body-level paragraph kinds. fn/en/cmt are structural definitions in
+            // their own parts; "tracking" a definition deletion has no Word semantics,
+            // so for those we always perform the structural delete.
+            if (_settings.TrackedChanges == TrackedChangeMode.RenderInline
+                && target.Anchor.Kind is "p" or "h" or "li")
             {
                 WrapRunsInDel(element);
                 InvalidateProjectionCache();
@@ -872,6 +888,17 @@ public sealed class DocxSession : IDisposable
                     Modified = new[] { target.Anchor },
                     Patch = ProjectScope(target),
                 };
+            }
+
+            // For fn/en/cmt: also remove every cross-reference (footnoteReference,
+            // endnoteReference, commentReference/RangeStart/RangeEnd) anywhere in
+            // the package that points at this definition's id. Otherwise Word
+            // renders broken superscript references for the orphaned ids.
+            if (target.Anchor.Kind is "fn" or "en" or "cmt")
+            {
+                var elementId = (string?)element.Attribute(W.id);
+                if (!string.IsNullOrEmpty(elementId))
+                    RemoveCrossReferences(target.Anchor.Kind, elementId);
             }
 
             // Collect descendant anchors before removal so the caller knows what's gone.
@@ -902,6 +929,72 @@ public sealed class DocxSession : IDisposable
             _ = _history.PopForUndo();
             return EditResult.Fail(EditErrorCode.InternalError, ex.Message, anchorId);
         }
+    }
+
+    /// <summary>
+    /// Strips every cross-reference pointing at the named footnote/endnote/comment id
+    /// from every part of the package that can hold one. For footnotes/endnotes that's
+    /// just <c>w:footnoteReference</c>/<c>w:endnoteReference</c>; for comments it's the
+    /// triple <c>w:commentReference</c> + <c>w:commentRangeStart</c> + <c>w:commentRangeEnd</c>
+    /// — leaving any of the three behind makes Word render a broken comment marker.
+    /// </summary>
+    private void RemoveCrossReferences(string kind, string elementId)
+    {
+        XName referenceName = kind switch
+        {
+            "fn" => W.footnoteReference,
+            "en" => W.endnoteReference,
+            "cmt" => W.commentReference,
+            _ => null!,
+        };
+        if (referenceName is null) return;
+
+        foreach (var part in EnumerateProjectedParts())
+        {
+            var root = part.GetXDocument().Root;
+            if (root is null) continue;
+            bool any = false;
+            foreach (var refEl in root.Descendants(referenceName)
+                .Where(r => (string?)r.Attribute(W.id) == elementId).ToList())
+            {
+                var parentRun = refEl.Parent;
+                refEl.Remove();
+                any = true;
+                // The reference was the only meaningful child of its <w:r> wrapper:
+                // strip the run too so we don't leave behind an empty <w:r> with a
+                // FootnoteReference run style (which Word renders as an empty styled
+                // span — invisible but untidy and confusing to downstream tooling).
+                RemoveEmptyRunIfNeeded(parentRun);
+            }
+            if (kind == "cmt")
+            {
+                foreach (var rangeEl in root.Descendants(W.commentRangeStart)
+                    .Concat(root.Descendants(W.commentRangeEnd))
+                    .Where(r => (string?)r.Attribute(W.id) == elementId).ToList())
+                {
+                    rangeEl.Remove();
+                    any = true;
+                }
+            }
+            if (any) part.PutXDocument();
+        }
+    }
+
+    /// <summary>
+    /// If <paramref name="run"/> is a <c>&lt;w:r&gt;</c> whose only remaining children
+    /// are properties (<c>w:rPr</c>) — no text, no breaks, no fields, no other content —
+    /// remove the run. Avoids leaving orphaned styled-empty spans after the meaningful
+    /// child (a footnote/endnote reference) was stripped.
+    /// </summary>
+    private static void RemoveEmptyRunIfNeeded(XElement? run)
+    {
+        if (run is null || run.Name != W.r) return;
+        foreach (var child in run.Elements())
+        {
+            if (child.Name == W.rPr) continue;
+            return; // has meaningful content — keep the run
+        }
+        run.Remove();
     }
 
     // ─── Tier B: structural ops ──────────────────────────────────────────
@@ -1587,18 +1680,31 @@ public sealed class DocxSession : IDisposable
 
     internal void InvalidateProjectionCache() => _cachedProjection = null;
 
-    internal sealed record DocumentSnapshot(XDocument MainXml);
+    /// <summary>
+    /// A per-part XML snapshot covering every part the projector / mutation ops walk.
+    /// Originally captured only <c>MainDocumentPart</c>, but any cross-part mutation
+    /// (footnote definition removal + body reference cleanup, comment range marker
+    /// stripping, Save's Unid-strip pass) needs to round-trip all parts — otherwise
+    /// undo or the Save restore would leak structural changes into peer parts.
+    /// </summary>
+    internal sealed record DocumentSnapshot(System.Collections.Generic.IReadOnlyList<(string PartUri, XDocument Xml)> Parts);
 
     internal DocumentSnapshot TakeSnapshot()
     {
-        var main = _doc!.MainDocumentPart!.GetXDocument();
-        return new DocumentSnapshot(new XDocument(main));
+        var parts = new System.Collections.Generic.List<(string, XDocument)>();
+        foreach (var part in EnumerateProjectedParts())
+            parts.Add((part.Uri.ToString(), new XDocument(part.GetXDocument())));
+        return new DocumentSnapshot(parts);
     }
 
     internal void RestoreSnapshot(DocumentSnapshot snapshot)
     {
-        var part = _doc!.MainDocumentPart!;
-        part.PutXDocument(new XDocument(snapshot.MainXml));
+        var byUri = snapshot.Parts.ToDictionary(p => p.PartUri, p => p.Xml);
+        foreach (var part in EnumerateProjectedParts())
+        {
+            if (!byUri.TryGetValue(part.Uri.ToString(), out var xml)) continue;
+            part.PutXDocument(new XDocument(xml));
+        }
         InvalidateProjectionCache();
     }
 
