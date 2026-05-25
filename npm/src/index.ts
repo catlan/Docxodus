@@ -66,6 +66,7 @@ export type {
   FormatOp,
   MarkdownPatch,
 } from "./types.js";
+export type { FillOptions, BulkEditResult } from "./types.js";
 
 /**
  * Open a {@link DocxSession} for surgical mutation of a DOCX. Requires

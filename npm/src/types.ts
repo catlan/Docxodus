@@ -688,6 +688,14 @@ export interface DocxodusWasmExports {
     GrepCrossBlock: (handle: number, pattern: string, optionsJson: string) => string;
     ReplaceTextRange: (handle: number, anchor: string, find: string, replace: string, optionsJson: string) => string;
     ReplaceTextAtSpan: (handle: number, anchor: string, spanStart: number, spanLength: number, replace: string) => string;
+    ReplaceInner: (
+      handle: number,
+      matchText: string,
+      anchor: string,
+      spanStart: number,
+      spanLength: number,
+      newInner: string,
+    ) => string;
     FindPlaceholders: (handle: number, kinds: number, scope: number) => string;
     FindByAnnotation: (handle: number, annotationId: string) => string;
     FindByLabel: (handle: number, labelId: string) => string;
@@ -911,6 +919,39 @@ export interface TemplatePlaceholder {
   /** For `instruction` placeholders: the inner text with surrounding brackets/asterisks stripped. */
   hint?: string;
   match: TextMatch;
+  /**
+   * Additional plausible classifications when the primary `kind` is borderline.
+   * Empty by default. The classic case is a long bracketed clause that happens
+   * to contain a `_______` blank: primary `kind` stays `"blank_fill"`
+   * (back-compat) and `alternativeKinds` contains `"alternative_clause"`.
+   */
+  alternativeKinds: PlaceholderKind[];
+}
+
+/**
+ * Options for {@link DocxSession.fillPlaceholders}.
+ */
+export interface FillOptions {
+  /** Which placeholder kinds to fill. Defaults to `BlankFill | Instruction`. */
+  kinds?: number;
+  /** Which package parts to scan. Defaults to body (1). */
+  scope?: number;
+  /** Max iteration passes for multi-pass nested-bracket scenarios. Default 8. */
+  maxPasses?: number;
+  /** When the match starts with `$` and the picker's return value doesn't,
+   *  preserve the `$` by prepending it. Default true. */
+  preserveDollarPrefix?: boolean;
+}
+
+/**
+ * Aggregate result returned by {@link DocxSession.fillPlaceholders}.
+ */
+export interface BulkEditResult {
+  filled: number;
+  skipped: number;
+  passes: number;
+  unfilled: TemplatePlaceholder[];
+  errors: EditError[];
 }
 
 /**

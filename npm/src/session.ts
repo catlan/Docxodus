@@ -5,13 +5,16 @@ import type {
   AnchorInfo,
   AnchorRef,
   AnchorTargetRef,
+  BulkEditResult,
   CharSpan,
   CrossBlockMatch,
   DocumentAnnotation,
   DocxodusWasmExports,
   DocxSessionProjection,
   DocxSessionSettings,
+  EditError,
   EditResult,
+  FillOptions,
   FormatOp,
   GrepOptions,
   ReplaceOptions,
@@ -189,6 +192,104 @@ export class DocxSession {
     return JSON.parse(
       this.wasm.ReplaceTextAtSpan(this.handle, match.enclosingAnchor.id, match.span.start, match.span.length, replace)
     ) as EditResult;
+  }
+
+  /**
+   * Replace the bracketed portion of a `TextMatch` with `newInner`, preserving any
+   * prefix or suffix outside the brackets. Designed for `findPlaceholders` matches
+   * like `$[___]` where the regex `\$?\[…\]` captures a leading `$`:
+   * `replaceInner(match, "0.20")` yields `$0.20`, not `0.20`.
+   *
+   * Returns `MalformedMarkdown` if the match text does not contain balanced brackets.
+   */
+  replaceInner(match: TextMatch, newInner: string): EditResult {
+    return JSON.parse(this.wasm.ReplaceInner(
+      this.handle,
+      match.text,
+      match.enclosingAnchor.id,
+      match.span.start,
+      match.span.length,
+      newInner,
+    )) as EditResult;
+  }
+
+  /**
+   * Picker-driven template fill. For every placeholder matching `options.kinds`,
+   * calls `picker`; if the picker returns a non-null string, the placeholder is
+   * replaced (with optional `$`-prefix preservation). Iterates until no more
+   * placeholders match (or `maxPasses` is reached, or a pass makes zero changes)
+   * — handles nested brackets that surface only after the inner ones are stripped.
+   *
+   * The TypeScript implementation mirrors the .NET `DocxSession.FillPlaceholders`
+   * exactly. The picker is invoked synchronously inside the WASM worker; do not
+   * use it for async work or for picker logic that needs to await fetched data.
+   */
+  fillPlaceholders(
+    picker: (p: TemplatePlaceholder) => string | null | undefined,
+    options?: FillOptions,
+  ): BulkEditResult {
+    const opts = options ?? {};
+    const kinds = opts.kinds ?? (PlaceholderKinds.BlankFill | PlaceholderKinds.Instruction);
+    const scope = opts.scope ?? 1; // Body
+    const maxPasses = opts.maxPasses ?? 8;
+    const preserveDollarPrefix = opts.preserveDollarPrefix ?? true;
+
+    if (maxPasses <= 0) {
+      throw new RangeError("FillOptions.maxPasses must be > 0");
+    }
+
+    let filled = 0;
+    let workPasses = 0;
+    const errors: EditError[] = [];
+    const unfilled: TemplatePlaceholder[] = [];
+    const seenSkipKeys = new Set<string>();
+
+    for (let pass = 1; pass <= maxPasses; pass++) {
+      const placeholders = this.findPlaceholders(kinds, scope)
+        .sort((a, b) => {
+          const cmp = b.match.enclosingAnchor.id.localeCompare(a.match.enclosingAnchor.id);
+          if (cmp !== 0) return cmp;
+          return b.match.span.start - a.match.span.start;
+        });
+      if (placeholders.length === 0) break;
+
+      let passChanges = 0;
+      for (const p of placeholders) {
+        const pick = picker(p);
+        if (pick == null) {
+          const key = `${p.match.enclosingAnchor.id}:${p.match.span.start}:${p.match.span.length}`;
+          if (!seenSkipKeys.has(key)) {
+            seenSkipKeys.add(key);
+            unfilled.push(p);
+          }
+          continue;
+        }
+
+        let replacement = pick;
+        if (preserveDollarPrefix && p.match.text.startsWith("$") && !replacement.startsWith("$")) {
+          replacement = "$" + replacement;
+        }
+
+        const r = this.replaceMatch(p.match, replacement);
+        if (r.success) {
+          filled++;
+          passChanges++;
+        } else if (r.error) {
+          errors.push(r.error);
+        }
+      }
+
+      if (passChanges > 0) workPasses = pass;
+      if (passChanges === 0) break;
+    }
+
+    return {
+      filled,
+      skipped: unfilled.length,
+      passes: workPasses,
+      unfilled,
+      errors,
+    };
   }
 
   /**
