@@ -33,6 +33,16 @@ public static partial class DocxSessionBridge
     [JSExport]
     public static string Project(int handle) => DocxSessionOps.Project(handle);
 
+    /// <summary>
+    /// Bridge for <see cref="DocxSession.ProjectAnchor"/>. <paramref name="depth"/>
+    /// uses the numeric layout of <see cref="ProjectionDepth"/> (SelfOnly=0,
+    /// Subtree=1, SubtreeAndFollowingSiblings=2). Returns a JSON object with
+    /// the standard MarkdownProjection shape (markdown + anchorIndex).
+    /// </summary>
+    [JSExport]
+    public static string ProjectAnchor(int h, string anchorId, int depth) =>
+        DocxSessionOps.ProjectAnchor(h, anchorId, (ProjectionDepth)depth);
+
     [JSExport]
     public static string ReplaceText(int h, string anchor, string md) =>
         DocxSessionOps.ReplaceText(h, anchor, md);

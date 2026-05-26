@@ -27,6 +27,9 @@ internal static class DocxSessionOps
     public static string Project(int handle) =>
         DocxSessionJson.SerializeProjection(SessionRegistry.Get(handle).Project());
 
+    public static string ProjectAnchor(int handle, string anchorId, ProjectionDepth depth) =>
+        DocxSessionJson.SerializeProjection(SessionRegistry.Get(handle).ProjectAnchor(anchorId, depth));
+
     public static string Grep(int handle, string pattern, RegexOptions regexOpts,
         ProjectionScopes scope, int contextChars, WhitespaceMode whitespace, ContextBoundary boundary) =>
         DocxSessionJson.SerializeMatches(

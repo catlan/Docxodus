@@ -1003,6 +1003,127 @@ public class WmlToMarkdownConverterTests
     }
 
     [Fact]
+    public void MD080_AnchorIdRendering_FullUnid_IsExistingBehavior()
+    {
+        // Default rendering — anchor tokens carry the full 32-char hex Unid.
+        var bytes = DocxSessionTests.BuildDS001_SimpleTwoParagraphs();
+        var wml = new WmlDocument("test.docx", bytes);
+        var settings = new WmlToMarkdownConverterSettings();   // AnchorIdRendering defaults to FullUnid
+        var projection = WmlToMarkdownConverter.Convert(wml, settings);
+
+        // Every {#…} token uses the full 32-char hex form (matched by regex {#kind:scope:UNID}).
+        var match = System.Text.RegularExpressions.Regex.Match(
+            projection.Markdown, @"\{#[^:]+:[^:]+:([a-f0-9]+)\}");
+        Assert.True(match.Success, "expected at least one anchor token in the projection");
+        Assert.Equal(32, match.Groups[1].Length);
+    }
+
+    [Fact]
+    public void MD081_AnchorIdRendering_Abbreviated_UsesShortestUniquePrefixPerScope()
+    {
+        // Abbreviated mode picks the shortest prefix per (kind, scope) bucket
+        // that uniquely identifies each anchor, with a 4-char floor.
+        var bytes = DocxSessionTests.BuildDS001_SimpleTwoParagraphs();
+        var wml = new WmlDocument("test.docx", bytes);
+        var settings = new WmlToMarkdownConverterSettings
+        {
+            AnchorIdRendering = AnchorIdRendering.Abbreviated,
+        };
+        var projection = WmlToMarkdownConverter.Convert(wml, settings);
+
+        // All emitted tokens are exactly 4 chars in their unid portion: for
+        // BuildDS001_SimpleTwoParagraphs (2 anchors per (kind, scope) bucket
+        // with full hex Unids), the shortest-unique-prefix algorithm always
+        // picks the 4-char floor.
+        foreach (System.Text.RegularExpressions.Match m in
+                 System.Text.RegularExpressions.Regex.Matches(projection.Markdown, @"\{#[^:]+:[^:]+:([a-f0-9]+)\}"))
+        {
+            var unid = m.Groups[1].Value;
+            Assert.True(unid.Length >= 4, $"abbreviation '{unid}' shorter than 4-char floor");
+            Assert.Equal(4, unid.Length);
+        }
+    }
+
+    [Fact]
+    public void MD082_AnchorIdRendering_Abbreviated_AnchorIndexHasDualKeys()
+    {
+        // The AnchorIndex must contain entries keyed by BOTH the full Unid and
+        // the abbreviated id, both pointing at the same AnchorTarget. Callers
+        // can use whichever form they have in hand.
+        var bytes = DocxSessionTests.BuildDS001_SimpleTwoParagraphs();
+        var wml = new WmlDocument("test.docx", bytes);
+        var settings = new WmlToMarkdownConverterSettings
+        {
+            AnchorIdRendering = AnchorIdRendering.Abbreviated,
+        };
+        var projection = WmlToMarkdownConverter.Convert(wml, settings);
+
+        // Find any anchor — extract its full Unid from the underlying AnchorTarget,
+        // and the abbreviated form from a token in the markdown.
+        var firstTarget = projection.AnchorIndex.Values
+            .First(t => t.Anchor.Scope == "body" && t.Anchor.Kind is "p" or "h");
+        var fullKey = firstTarget.Anchor.Id;
+        Assert.True(projection.AnchorIndex.ContainsKey(fullKey),
+            $"full key '{fullKey}' missing from index");
+
+        // The matching abbreviated key is somewhere in the markdown — extract any one.
+        var abbreviatedToken = System.Text.RegularExpressions.Regex.Match(
+            projection.Markdown, @"\{#([^:]+:[^:]+:[a-f0-9]+)\}");
+        Assert.True(abbreviatedToken.Success);
+        var abbreviatedKey = abbreviatedToken.Groups[1].Value;
+        Assert.NotEqual(fullKey, abbreviatedKey);  // it's actually abbreviated, not the full Unid
+        Assert.True(projection.AnchorIndex.ContainsKey(abbreviatedKey),
+            $"abbreviated key '{abbreviatedKey}' missing from index");
+
+        // Both keys resolve to the SAME AnchorTarget instance — reference identity
+        // is the load-bearing invariant (a future change that accidentally copied
+        // the target into both slots would fail loudly here).
+        var fromFull = projection.AnchorIndex[fullKey];
+        var fromAbbreviated = projection.AnchorIndex[abbreviatedKey];
+        Assert.Same(fromFull, fromAbbreviated);
+    }
+
+    [Fact]
+    public void MD083_AnchorIdRendering_Sequential_NumbersPerScopeKindBucket()
+    {
+        var bytes = DocxSessionTests.BuildDS001_SimpleTwoParagraphs();
+        var wml = new WmlDocument("test.docx", bytes);
+        var settings = new WmlToMarkdownConverterSettings
+        {
+            AnchorIdRendering = AnchorIdRendering.Sequential,
+        };
+        var projection = WmlToMarkdownConverter.Convert(wml, settings);
+
+        // Each (kind, scope) bucket starts at 1 and increments per anchor in document order.
+        // BuildDS001 has 2 body paragraphs → tokens "{#p:body:1}" and "{#p:body:2}".
+        Assert.Contains("{#p:body:1}", projection.Markdown);
+        Assert.Contains("{#p:body:2}", projection.Markdown);
+    }
+
+    [Fact]
+    public void MD084_AnchorIdRendering_Sequential_AnchorIndexHasDualKeys()
+    {
+        var bytes = DocxSessionTests.BuildDS001_SimpleTwoParagraphs();
+        var wml = new WmlDocument("test.docx", bytes);
+        var settings = new WmlToMarkdownConverterSettings
+        {
+            AnchorIdRendering = AnchorIdRendering.Sequential,
+        };
+        var projection = WmlToMarkdownConverter.Convert(wml, settings);
+
+        // The full key still resolves; AND the sequential alias key resolves;
+        // and both point at the SAME AnchorTarget instance — reference identity
+        // is the load-bearing invariant (consistent with MD082's tightening).
+        var firstTarget = projection.AnchorIndex.Values
+            .First(t => t.Anchor.Scope == "body" && t.Anchor.Kind == "p");
+        Assert.True(projection.AnchorIndex.ContainsKey(firstTarget.Anchor.Id));
+        Assert.True(projection.AnchorIndex.ContainsKey("p:body:1"));
+        var fromFull = projection.AnchorIndex[firstTarget.Anchor.Id];
+        var fromSequential = projection.AnchorIndex["p:body:1"];
+        Assert.Same(fromFull, fromSequential);
+    }
+
+    [Fact]
     public void MD006_BoilerplateFootnotesNotInAnchorIndex()
     {
         // Every DOCX with a FootnotesPart includes two Word-reserved boilerplate

@@ -3143,6 +3143,62 @@ public class DocxSessionTests
         Assert.Equal(0, r.RunsRemoved);
     }
 
+    // ─── ProjectAnchor (issue #167 — renumbered to DS310-DS313 to avoid
+    // collision with DS295-DS298 CompactRuns that landed on main) ─────────
+
+    [Fact]
+    public void DS310_ProjectAnchor_OnParagraph_ReturnsJustThatParagraph()
+    {
+        using var session = new DocxSession(BuildDocWithHeadingSections());
+        var firstPara = session.Project().AnchorIndex.Values
+            .First(t => session.GetAnchorInfo(t.Anchor.Id)?.TextPreview == "para 1.1");
+
+        var sub = session.ProjectAnchor(firstPara.Anchor.Id);
+        Assert.Contains("para 1.1", sub.Markdown);
+        Assert.DoesNotContain("Section One.A", sub.Markdown);
+        Assert.DoesNotContain("Section Two", sub.Markdown);
+    }
+
+    [Fact]
+    public void DS311_ProjectAnchor_OnHeading_ReturnsTheWholeSection()
+    {
+        using var session = new DocxSession(BuildDocWithHeadingSections());
+        var sectionOne = session.Project().AnchorIndex.Values
+            .First(t => session.GetAnchorInfo(t.Anchor.Id)?.TextPreview == "Section One");
+
+        var sub = session.ProjectAnchor(sectionOne.Anchor.Id);
+        // The Heading1 section runs from "Section One" through everything before the next Heading1.
+        Assert.Contains("Section One", sub.Markdown);
+        Assert.Contains("para 1.1", sub.Markdown);
+        Assert.Contains("Section One.A", sub.Markdown);
+        Assert.Contains("para 1.A.1", sub.Markdown);
+        // …but does NOT include "Section Two" (the next Heading1 boundary).
+        Assert.DoesNotContain("Section Two", sub.Markdown);
+        Assert.DoesNotContain("para 2.1", sub.Markdown);
+    }
+
+    [Fact]
+    public void DS312_ProjectAnchor_OnLastHeading_ExtendsToEndOfParent()
+    {
+        using var session = new DocxSession(BuildDocWithHeadingSections());
+        var sectionTwo = session.Project().AnchorIndex.Values
+            .First(t => session.GetAnchorInfo(t.Anchor.Id)?.TextPreview == "Section Two");
+
+        var sub = session.ProjectAnchor(sectionTwo.Anchor.Id);
+        Assert.Contains("Section Two", sub.Markdown);
+        Assert.Contains("para 2.1", sub.Markdown);
+        Assert.DoesNotContain("Section One", sub.Markdown);
+    }
+
+    [Fact]
+    public void DS313_ProjectAnchor_UnknownAnchorThrows()
+    {
+        using var session = new DocxSession(BuildDocWithHeadingSections());
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            session.ProjectAnchor("p:body:0000000000000000ffffffffffffffff"));
+        Assert.Contains("not found", ex.Message);
+    }
+
     // ─── Deterministic Unids ──────────────────────────────────────────────
 
     [Fact]
