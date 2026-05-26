@@ -1548,6 +1548,10 @@ public sealed class DocxSession : IDisposable
 
     private static string SerializeDiff(List<DiffEntry> entries)
     {
+        // Hand-rolled JSON so SerializeDiff stays trim/AOT-safe; the WASM build
+        // ships with reflection-based serialization disabled, so
+        // `System.Text.Json.JsonSerializer.Serialize(...)` throws
+        // `JsonSerializerIsReflectionDisabled` at runtime in the browser.
         if (entries.Count == 0) return "[]";
         var sb = new System.Text.StringBuilder(entries.Count * 100 + 2);
         sb.Append('[');
@@ -1556,15 +1560,45 @@ public sealed class DocxSession : IDisposable
             if (i > 0) sb.Append(',');
             var e = entries[i];
             sb.Append("{\"op\":\"").Append(e.Op).Append("\"")
-              .Append(",\"anchorId\":").Append(System.Text.Json.JsonSerializer.Serialize(e.AnchorId));
+              .Append(",\"anchorId\":");
+            AppendJsonString(sb, e.AnchorId);
             if (e.Before is not null)
-                sb.Append(",\"before\":").Append(System.Text.Json.JsonSerializer.Serialize(e.Before));
+            {
+                sb.Append(",\"before\":");
+                AppendJsonString(sb, e.Before);
+            }
             if (e.After is not null)
-                sb.Append(",\"after\":").Append(System.Text.Json.JsonSerializer.Serialize(e.After));
+            {
+                sb.Append(",\"after\":");
+                AppendJsonString(sb, e.After);
+            }
             sb.Append('}');
         }
         sb.Append(']');
         return sb.ToString();
+    }
+
+    private static void AppendJsonString(System.Text.StringBuilder sb, string s)
+    {
+        sb.Append('"');
+        foreach (var c in s)
+        {
+            switch (c)
+            {
+                case '"': sb.Append("\\\""); break;
+                case '\\': sb.Append("\\\\"); break;
+                case '\n': sb.Append("\\n"); break;
+                case '\r': sb.Append("\\r"); break;
+                case '\t': sb.Append("\\t"); break;
+                case '\b': sb.Append("\\b"); break;
+                case '\f': sb.Append("\\f"); break;
+                default:
+                    if (c < 0x20) sb.Append("\\u").Append(((int)c).ToString("X4"));
+                    else sb.Append(c);
+                    break;
+            }
+        }
+        sb.Append('"');
     }
 
     /// <summary>
