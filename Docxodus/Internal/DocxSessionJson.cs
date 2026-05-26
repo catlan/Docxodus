@@ -68,11 +68,13 @@ internal static class DocxSessionJson
     public static FindOptions? ParseFindOptions(JsonElement root)
     {
         if (root.ValueKind != JsonValueKind.Object) return null;
+        var scopes = (ProjectionScopes)TryGetInt(root, "scopes", (int)ProjectionScopes.All);
         return new FindOptions
         {
             IgnoreCase = TryGetBool(root, "ignoreCase", false),
             IgnoreWhitespace = TryGetBool(root, "ignoreWhitespace", false),
             KindFilter = TryGetString(root, "kindFilter", null),
+            Scopes = scopes,
             ScopeFilter = TryGetString(root, "scopeFilter", null),
         };
     }

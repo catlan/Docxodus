@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **`FindOptions.Scopes` (`ProjectionScopes` flag set) + `session.AnchorsByScope`.** The `FindBy*` helpers previously had to default to body and use a string `ScopeFilter` to widen — surveying headers/footers/footnotes meant either passing a magic string like `"hdr1"` (which only matches one part) or walking `Project().AnchorIndex` and filtering by scope name manually. The new `FindOptions.Scopes` field is typed and composable: `Scopes = ProjectionScopes.Headers | ProjectionScopes.Footers` searches every header and every footer in one call. Defaults to `All` so existing callers see no behavior change. The string `ScopeFilter` remains for the rare case of pinning one specific named part (e.g. `"hdr1"` only); it now applies as a finer post-filter on top of `Scopes`. `session.AnchorsByScope(scopes)` is the search-free convenience for the common "enumerate every anchor in scope X" pattern. A new `ProjectionScopesExtensions.IncludesScope(scopeName)` helper exposes the scope-name → flag mapping (`hdr*` → `Headers`, `ftr*` → `Footers`, etc.) for callers that want it directly. Wire shape: `FindOptions` JSON now reads optional `scopes` (number); WASM/Python bridges pick it up automatically. Tests: `DS280`–`DS284`.
+
 ### Fixed
 - **`tools/python-host/pyhost.csproj` — suppress StyleCop SA1633/SA1636 file-header rules** (issue #173). `dotnet build -c Release tools/python-host/pyhost.csproj` was failing because `Directory.Build.props` sets `TreatWarningsAsErrors=true` for Release and the python-host project inherited the StyleCop ruleset without suppressing the file-header warnings on `Dispatcher.cs` and `Program.cs`. Added `<NoWarn>$(NoWarn);SA1633;SA1636</NoWarn>` to the csproj, matching the existing convention in `wasm/DocxodusWasm/DocxodusWasm.csproj` for tooling/wasm subprojects.
 
