@@ -219,10 +219,17 @@ public sealed record ReplaceOptions
 /// </summary>
 public sealed record FillOptions
 {
-    /// <summary>Which placeholder kinds to fill. Defaults to <c>BlankFill | Instruction</c>
-    /// — the kinds with a single replacement value. Add <c>AlternativeClause</c> to
-    /// run the picker on bracketed clauses too (e.g. for bracket-stripping).</summary>
-    public PlaceholderKinds Kinds { get; init; } = PlaceholderKinds.BlankFill | PlaceholderKinds.Instruction;
+    /// <summary>Which placeholder kinds to fill. Defaults to
+    /// <see cref="PlaceholderKinds.All"/> so the picker is invoked for every kind
+    /// the doc contains — <c>BlankFill</c>, <c>Instruction</c>, *and*
+    /// <c>AlternativeClause</c>. Narrow with e.g. <c>BlankFill | Instruction</c>
+    /// if you only want value-slot fills and intend to ignore bracketed clauses.</summary>
+    /// <remarks>The previous default (<c>BlankFill | Instruction</c>) silently
+    /// excluded <c>AlternativeClause</c> placeholders, which caused pickers with
+    /// bracket-stripping rules to appear to do nothing on those matches. The new
+    /// default lets the picker see everything; pickers that don't recognize a
+    /// kind should simply return <c>null</c> for it.</remarks>
+    public PlaceholderKinds Kinds { get; init; } = PlaceholderKinds.All;
 
     /// <summary>Which package parts to scan. Defaults to body.</summary>
     public ProjectionScopes Scope { get; init; } = ProjectionScopes.Body;
@@ -337,7 +344,24 @@ public sealed record TemplatePlaceholder
     public IReadOnlyList<PlaceholderKind> AlternativeKinds { get; init; } = Array.Empty<PlaceholderKind>();
 }
 
-public sealed record AnchorInfo(string Id, string Kind, string Scope, string TextPreview);
+public sealed record AnchorInfo(string Id, string Kind, string Scope, string TextPreview)
+{
+    /// <summary>
+    /// Resolved auto-numbering prefix (e.g. <c>"First"</c>, <c>"1."</c>). <c>null</c>
+    /// when the element has no numbering or the kind doesn't carry it. See
+    /// <see cref="AnchorTarget.AutoNumberPrefix"/> for the full rationale.
+    /// </summary>
+    public string? AutoNumberPrefix { get; init; }
+
+    /// <summary>What a reader sees: <see cref="AutoNumberPrefix"/> + space + <see cref="TextPreview"/>
+    /// when a prefix is present, otherwise just <see cref="TextPreview"/>.</summary>
+    public string FullText =>
+        string.IsNullOrEmpty(AutoNumberPrefix)
+            ? TextPreview
+            : string.IsNullOrEmpty(TextPreview)
+                ? AutoNumberPrefix!
+                : AutoNumberPrefix + " " + TextPreview;
+}
 
 /// <summary>
 /// Snapshot of the high-signal "is this template fillable yet?" state for a
@@ -447,6 +471,15 @@ public sealed record DiffEntry
 }
 
 public sealed record MarkdownPatch(string ScopeAnchorId, string Markdown);
+
+/// <summary>Summary returned by <see cref="DocxSession.CompactRuns"/>.</summary>
+public sealed record CompactResult
+{
+    /// <summary>Number of <c>w:r</c> elements whose only content was a <c>w:rPr</c>
+    /// (or which had no children at all) and were therefore removed. <c>0</c>
+    /// means the document was already compact across the selected scopes.</summary>
+    public int RunsRemoved { get; init; }
+}
 
 public sealed record EditError(EditErrorCode Code, string Message, string? AnchorId = null);
 
@@ -728,7 +761,10 @@ public sealed class DocxSession : IDisposable
         ThrowIfDisposed();
         var target = FindAnchor(anchorId);
         if (target is null) return null;
-        return new AnchorInfo(target.Anchor.Id, target.Anchor.Kind, target.Anchor.Scope, target.TextPreview);
+        return new AnchorInfo(target.Anchor.Id, target.Anchor.Kind, target.Anchor.Scope, target.TextPreview)
+        {
+            AutoNumberPrefix = target.AutoNumberPrefix,
+        };
     }
 
     /// <summary>
@@ -750,7 +786,10 @@ public sealed class DocxSession : IDisposable
             var target = FindAnchor(id);
             result[id] = target is null
                 ? null
-                : new AnchorInfo(target.Anchor.Id, target.Anchor.Kind, target.Anchor.Scope, target.TextPreview);
+                : new AnchorInfo(target.Anchor.Id, target.Anchor.Kind, target.Anchor.Scope, target.TextPreview)
+                {
+                    AutoNumberPrefix = target.AutoNumberPrefix,
+                };
         }
         return result;
     }
@@ -3094,6 +3133,79 @@ public sealed class DocxSession : IDisposable
             Modified = new[] { updated },
             Patch = ProjectScope(target),
         };
+    }
+
+    // ─── Maintenance / cleanup ───────────────────────────────────────────
+
+    /// <summary>
+    /// Remove every <c>w:r</c> in the selected scopes whose only content is a
+    /// <c>w:rPr</c> (no text, no tabs, no breaks, no field/footnote/comment
+    /// references). Generally useful after any workflow that deletes inline
+    /// content — accepting tracked changes, removing footnotes/comments, run-text
+    /// refactors — and leaves behind formatting-only runs that the document
+    /// model carries but that have no visible effect on rendering.
+    /// </summary>
+    /// <param name="scopes">Which package parts to compact. Defaults to
+    /// <see cref="ProjectionScopes.All"/>.</param>
+    /// <returns>How many runs were removed. <c>0</c> means the document was
+    /// already compact within the selected scopes.</returns>
+    /// <remarks>
+    /// One pre-op snapshot is recorded; <see cref="Undo"/> rolls every removal
+    /// back together. Block-level anchors (paragraphs / headings / list items /
+    /// tables / table cells) are unaffected — runs aren't part of the
+    /// <see cref="MarkdownProjection.AnchorIndex"/>.
+    /// </remarks>
+    public CompactResult CompactRuns(ProjectionScopes scopes = ProjectionScopes.All)
+    {
+        ThrowIfDisposed();
+        _history.RecordPreOp(TakeSnapshot());
+
+        int removed = 0;
+        foreach (var part in EnumerateProjectedPartsForScopes(scopes))
+        {
+            var root = part.GetXDocument().Root;
+            if (root is null) continue;
+            // Materialize before mutating — Remove() during enumeration is unsafe.
+            foreach (var r in root.Descendants(W.r).ToList())
+            {
+                if (IsEmptyRun(r))
+                {
+                    r.Remove();
+                    removed++;
+                }
+            }
+            part.PutXDocument();
+        }
+        if (removed > 0) InvalidateProjectionCache();
+        return new CompactResult { RunsRemoved = removed };
+    }
+
+    private static bool IsEmptyRun(XElement r)
+    {
+        foreach (var child in r.Elements())
+        {
+            if (child.Name == W.rPr) continue;
+            // any other child (w:t, w:tab, w:br, w:footnoteReference, …) is meaningful
+            return false;
+        }
+        return true;
+    }
+
+    private IEnumerable<OpenXmlPart> EnumerateProjectedPartsForScopes(ProjectionScopes scopes)
+    {
+        var main = _doc!.MainDocumentPart;
+        if (main is null) yield break;
+        if (scopes.HasFlag(ProjectionScopes.Body)) yield return main;
+        if (scopes.HasFlag(ProjectionScopes.Headers))
+            foreach (var h in main.HeaderParts) yield return h;
+        if (scopes.HasFlag(ProjectionScopes.Footers))
+            foreach (var f in main.FooterParts) yield return f;
+        if (scopes.HasFlag(ProjectionScopes.Footnotes) && main.FootnotesPart is not null)
+            yield return main.FootnotesPart;
+        if (scopes.HasFlag(ProjectionScopes.Endnotes) && main.EndnotesPart is not null)
+            yield return main.EndnotesPart;
+        if (scopes.HasFlag(ProjectionScopes.Comments) && main.WordprocessingCommentsPart is not null)
+            yield return main.WordprocessingCommentsPart;
     }
 
     // ─── Undo / Redo ─────────────────────────────────────────────────────

@@ -141,6 +141,12 @@ export interface MarkdownAnchorTarget {
   partUri: string;
   /** First ~80 characters of the element's flat text — for previewing/picking anchors. */
   textPreview: string;
+  /** Resolved auto-numbering prefix (e.g. "1.", "First") for paragraphs/headings/list
+   *  items whose style or `w:numPr` produces numbering. Absent when the element has
+   *  no numbering. The prefix is NOT included in {@link textPreview} because
+   *  textPreview reflects only the run text; this field gives callers the value
+   *  Word actually renders before the element's text. */
+  autoNumberPrefix?: string;
 }
 
 /**
@@ -1053,7 +1059,10 @@ export interface TemplatePlaceholder {
  * Options for {@link DocxSession.fillPlaceholders}.
  */
 export interface FillOptions {
-  /** Which placeholder kinds to fill. Defaults to `BlankFill | Instruction`. */
+  /** Which placeholder kinds to fill. Defaults to `PlaceholderKinds.All` so the
+   *  picker is invoked for every kind in the doc. Narrow with e.g.
+   *  `PlaceholderKinds.BlankFill | PlaceholderKinds.Instruction` to ignore
+   *  bracketed alternative clauses. */
   kinds?: number;
   /** Which package parts to scan. Defaults to body (1). */
   scope?: number;
@@ -1120,6 +1129,9 @@ export interface AnchorTargetRef extends AnchorRef {
   partUri: string;
   /** First ~80 characters of the element's flat text — for previewing/picking anchors. */
   textPreview: string;
+  /** Resolved auto-numbering prefix (e.g. "1.", "First") when the element carries
+   *  numbering. Absent otherwise. See {@link MarkdownAnchorTarget.autoNumberPrefix}. */
+  autoNumberPrefix?: string;
 }
 
 /**
@@ -1132,6 +1144,9 @@ export interface AnchorInfo {
   kind: string;
   scope: string;
   textPreview: string;
+  /** Resolved auto-numbering prefix (e.g. "1.", "First") when the element carries
+   *  numbering. Absent for un-numbered paragraphs or non-paragraph kinds. */
+  autoNumberPrefix?: string;
 }
 
 /**
