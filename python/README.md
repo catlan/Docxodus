@@ -1,6 +1,6 @@
 # docx-scalpel
 
-**LLM-friendly Python wrapper for [Docxodus](https://github.com/JSv4/Docxodus)' `DocxSession` — anchor-addressed DOCX editing for agentic pipelines.**
+**Anchor-addressed DOCX editing for LLM agents — a thin client over [Docxodus](https://github.com/JSv4/Docxodus)' `DocxSession`.**
 
 `docx-scalpel` exposes Docxodus' stateful DOCX editor over a long-running .NET subprocess (`docxodus-pyhost`). The session lives in the host's memory until you explicitly release it, so an LLM agent can issue dozens of small edits against one document without paying the OOXML parse + Unid annotation + projection cost on every call.
 

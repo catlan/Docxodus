@@ -1,4 +1,8 @@
-"""docx-scalpel — LLM-friendly Python wrapper for Docxodus' ``DocxSession``.
+"""docx-scalpel — anchor-addressed DOCX editing for LLM agents.
+
+A thin client over Docxodus' ``DocxSession``, spoken to via a long-running
+``docxodus-pyhost`` subprocess so the session can persist in memory across
+many calls.
 
 Quick start::
 
