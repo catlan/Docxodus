@@ -200,8 +200,42 @@ public sealed record FindOptions
     /// <summary>If set, only return anchors of this kind (e.g. <c>"h"</c> for headings).</summary>
     public string? KindFilter { get; init; }
 
-    /// <summary>If set, only return anchors in this scope (e.g. <c>"body"</c>, <c>"hdr1"</c>).</summary>
+    /// <summary>
+    /// Coarse-grained scope filter — a flag set selecting whole categories of
+    /// package parts (Body, all Headers, all Footers, Footnotes, Endnotes,
+    /// Comments). Defaults to <see cref="ProjectionScopes.All"/>. Compose with
+    /// <c>|</c> to widen, e.g. <c>Scopes = ProjectionScopes.Body | ProjectionScopes.Headers</c>.
+    /// </summary>
+    /// <remarks>Use this in preference to <see cref="ScopeFilter"/> — it's
+    /// typed, composable, and uniform with <see cref="DocxSession.Grep"/>'s
+    /// <c>scope</c> parameter. <see cref="ScopeFilter"/> remains for the rare
+    /// case where you need to target a single named part like <c>"hdr1"</c>.</remarks>
+    public ProjectionScopes Scopes { get; init; } = ProjectionScopes.All;
+
+    /// <summary>If set, only return anchors whose scope name matches exactly
+    /// (e.g. <c>"body"</c>, <c>"hdr1"</c>). Applied AFTER <see cref="Scopes"/>
+    /// as a further narrowing — set both to restrict to one specific part inside
+    /// a category. Most callers should use <see cref="Scopes"/> instead.</summary>
     public string? ScopeFilter { get; init; }
+}
+
+/// <summary>Convenience predicates over the <see cref="ProjectionScopes"/> flag set.</summary>
+public static class ProjectionScopesExtensions
+{
+    /// <summary>Returns true when <paramref name="scopeName"/> (e.g. <c>"body"</c>,
+    /// <c>"hdr1"</c>, <c>"fn"</c>) belongs to <paramref name="set"/>.</summary>
+    public static bool IncludesScope(this ProjectionScopes set, string scopeName)
+    {
+        if (set == ProjectionScopes.All) return true;
+        if (string.IsNullOrEmpty(scopeName)) return false;
+        if (scopeName == "body") return set.HasFlag(ProjectionScopes.Body);
+        if (scopeName.StartsWith("hdr", System.StringComparison.Ordinal)) return set.HasFlag(ProjectionScopes.Headers);
+        if (scopeName.StartsWith("ftr", System.StringComparison.Ordinal)) return set.HasFlag(ProjectionScopes.Footers);
+        if (scopeName == "fn") return set.HasFlag(ProjectionScopes.Footnotes);
+        if (scopeName == "en") return set.HasFlag(ProjectionScopes.Endnotes);
+        if (scopeName == "cmt") return set.HasFlag(ProjectionScopes.Comments);
+        return false;
+    }
 }
 
 /// <summary>Options that tune <see cref="DocxSession.ReplaceTextRange"/>.</summary>
@@ -1113,10 +1147,13 @@ public sealed class DocxSession : IDisposable
         FindOptions options)
     {
         ThrowIfDisposed();
+        // Prefer Scopes (typed, composable) for the underlying Grep walker. The
+        // string ScopeFilter still applies as a finer post-filter below for
+        // callers targeting a single named part like "hdr1".
         var matches = Grep(
             pattern,
             regexOptions,
-            ProjectionScopes.All, // pre-filter so caller-level filters (KindFilter, ScopeFilter) apply uniformly below
+            options.Scopes,
             contextChars: 0,
             whitespace: options.IgnoreWhitespace ? WhitespaceMode.Normalize : WhitespaceMode.Preserve);
 
@@ -1130,6 +1167,29 @@ public sealed class DocxSession : IDisposable
             if (!seen.Add(anchor.Anchor.Id)) continue;
             result.Add(anchor);
         }
+        return result;
+    }
+
+    /// <summary>
+    /// Enumerate every anchor whose scope belongs to <paramref name="scopes"/>, in
+    /// projection order. Convenience over walking <c>Project().AnchorIndex</c> and
+    /// filtering by scope name — common for callers that want to operate on every
+    /// header paragraph, every footnote, etc.
+    /// </summary>
+    /// <example>
+    /// <code>
+    /// // Every paragraph in any header or footer:
+    /// foreach (var t in session.AnchorsByScope(ProjectionScopes.Headers | ProjectionScopes.Footers))
+    ///     Console.WriteLine($"{t.Anchor.Scope}: {t.TextPreview}");
+    /// </code>
+    /// </example>
+    public IReadOnlyList<AnchorTarget> AnchorsByScope(ProjectionScopes scopes)
+    {
+        ThrowIfDisposed();
+        var result = new List<AnchorTarget>();
+        foreach (var t in Project().AnchorIndex.Values)
+            if (scopes.IncludesScope(t.Anchor.Scope))
+                result.Add(t);
         return result;
     }
 
