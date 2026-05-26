@@ -2801,6 +2801,116 @@ public class DocxSessionTests
         Assert.Contains("para 2.1", afterMd);
     }
 
+    // ─── FindOptions.Scopes + AnchorsByScope ────────────────────────────
+
+    /// <summary>
+    /// Build a doc with one body paragraph + one header part + one footer part,
+    /// so scope-filter tests can confirm narrowing behavior.
+    /// </summary>
+    internal static byte[] BuildDocWithHeaderAndFooter()
+    {
+        using var ms = new MemoryStream();
+        using (var doc = WordprocessingDocument.Create(ms, WordprocessingDocumentType.Document))
+        {
+            var mainPart = doc.AddMainDocumentPart();
+            mainPart.Document = new Document(new Body());
+            var body = mainPart.Document.Body!;
+            mainPart.AddNewPart<StyleDefinitionsPart>().Styles = new Styles();
+            mainPart.AddNewPart<DocumentSettingsPart>().Settings = new Settings();
+
+            body.Append(new Paragraph(new Run(new Text("BODY-NEEDLE marker"))));
+
+            var hp = mainPart.AddNewPart<HeaderPart>();
+            hp.Header = new Header(new Paragraph(new Run(new Text("HEADER-NEEDLE confidential"))));
+            var hRef = new HeaderReference { Id = mainPart.GetIdOfPart(hp), Type = HeaderFooterValues.Default };
+
+            var fp = mainPart.AddNewPart<FooterPart>();
+            fp.Footer = new Footer(new Paragraph(new Run(new Text("FOOTER-NEEDLE page x"))));
+            var fRef = new FooterReference { Id = mainPart.GetIdOfPart(fp), Type = HeaderFooterValues.Default };
+
+            var sectPr = new SectionProperties(hRef, fRef);
+            body.Append(sectPr);
+        }
+        return ms.ToArray();
+    }
+
+    [Fact]
+    public void DS290_AnchorsByScope_BodyByDefault()
+    {
+        using var session = new DocxSession(BuildDocWithHeaderAndFooter());
+        var bodyAnchors = session.AnchorsByScope(ProjectionScopes.Body);
+        Assert.NotEmpty(bodyAnchors);
+        Assert.All(bodyAnchors, t => Assert.Equal("body", t.Anchor.Scope));
+    }
+
+    [Fact]
+    public void DS291_AnchorsByScope_HeadersFootersCompose()
+    {
+        using var session = new DocxSession(BuildDocWithHeaderAndFooter());
+        var hdrFtr = session.AnchorsByScope(ProjectionScopes.Headers | ProjectionScopes.Footers);
+        Assert.NotEmpty(hdrFtr);
+        Assert.All(hdrFtr, t =>
+            Assert.True(t.Anchor.Scope.StartsWith("hdr") || t.Anchor.Scope.StartsWith("ftr"),
+                $"Expected hdr*/ftr*, got {t.Anchor.Scope}"));
+        // Body anchors must NOT appear.
+        Assert.DoesNotContain(hdrFtr, t => t.Anchor.Scope == "body");
+    }
+
+    [Fact]
+    public void DS292_FindOptions_Scopes_NarrowsFindAllByText()
+    {
+        // Default Scopes = All. FindAllByText sees the body, header, and footer needles.
+        using var session = new DocxSession(BuildDocWithHeaderAndFooter());
+        var allHits = session.FindAllByText("NEEDLE");
+        Assert.Equal(3, allHits.Count);
+
+        // Narrow to Headers only — only the header needle survives.
+        var headerOnly = session.FindAllByText("NEEDLE", new FindOptions { Scopes = ProjectionScopes.Headers });
+        Assert.Single(headerOnly);
+        Assert.StartsWith("hdr", headerOnly[0].Anchor.Scope);
+
+        // Compose Body | Footers — two hits, neither is in a header.
+        var bodyAndFooters = session.FindAllByText("NEEDLE",
+            new FindOptions { Scopes = ProjectionScopes.Body | ProjectionScopes.Footers });
+        Assert.Equal(2, bodyAndFooters.Count);
+        Assert.DoesNotContain(bodyAndFooters, t => t.Anchor.Scope.StartsWith("hdr"));
+    }
+
+    [Fact]
+    public void DS293_FindOptions_ScopeFilter_StringStillNarrowsWithinScopes()
+    {
+        // Scopes selects Headers + Footers; ScopeFilter pins one specific part.
+        // The fine-grained string ScopeFilter is still respected as a further narrow.
+        using var session = new DocxSession(BuildDocWithHeaderAndFooter());
+        var hdr1Only = session.FindAllByText("NEEDLE", new FindOptions
+        {
+            Scopes = ProjectionScopes.Headers | ProjectionScopes.Footers,
+            ScopeFilter = "hdr1",
+        });
+        Assert.Single(hdr1Only);
+        Assert.Equal("hdr1", hdr1Only[0].Anchor.Scope);
+    }
+
+    [Fact]
+    public void DS294_ProjectionScopesExtensions_IncludesScopeRoundtrip()
+    {
+        // Cheap unit test for the helper — body, hdr*, ftr*, fn, en, cmt all map.
+        Assert.True(ProjectionScopes.Body.IncludesScope("body"));
+        Assert.True(ProjectionScopes.Headers.IncludesScope("hdr1"));
+        Assert.True(ProjectionScopes.Headers.IncludesScope("hdr27"));
+        Assert.False(ProjectionScopes.Headers.IncludesScope("body"));
+        Assert.True(ProjectionScopes.Footers.IncludesScope("ftr2"));
+        Assert.True(ProjectionScopes.Footnotes.IncludesScope("fn"));
+        Assert.True(ProjectionScopes.Endnotes.IncludesScope("en"));
+        Assert.True(ProjectionScopes.Comments.IncludesScope("cmt"));
+        Assert.True(ProjectionScopes.All.IncludesScope("anything-goes"));
+        // Composition.
+        var bodyHdr = ProjectionScopes.Body | ProjectionScopes.Headers;
+        Assert.True(bodyHdr.IncludesScope("body"));
+        Assert.True(bodyHdr.IncludesScope("hdr3"));
+        Assert.False(bodyHdr.IncludesScope("fn"));
+    }
+
     // ─── GetEditSummary (issue #166 — DS280-DS283) ────────────────────────
 
     [Fact]
