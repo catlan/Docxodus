@@ -2462,4 +2462,118 @@ public class DocxSessionTests
         using var s = new DocxSession(BuildDS200_CrossBlockFixture());
         Assert.Empty(s.GrepCrossBlock(""));
     }
+
+    // ─── DeleteRange (issue #165 — DS260-DS265) ───────────────────────────
+
+    internal static byte[] BuildDocFiveBodyParagraphs()
+    {
+        // Five top-level body paragraphs: para A through E. Used by DeleteRange
+        // tests that need a deterministic forward sequence of sibling blocks.
+        using var ms = new MemoryStream();
+        using (var doc = WordprocessingDocument.Create(ms, WordprocessingDocumentType.Document))
+        {
+            var main = doc.AddMainDocumentPart();
+            main.Document = new Document(new Body(
+                new Paragraph(new Run(new Text("Paragraph A"))),
+                new Paragraph(new Run(new Text("Paragraph B"))),
+                new Paragraph(new Run(new Text("Paragraph C"))),
+                new Paragraph(new Run(new Text("Paragraph D"))),
+                new Paragraph(new Run(new Text("Paragraph E")))));
+        }
+        return ms.ToArray();
+    }
+
+    [Fact]
+    public void DS260_DeleteRange_RemovesContiguousBlocksInOneCall()
+    {
+        using var session = new DocxSession(BuildDocFiveBodyParagraphs());
+        var body = session.Project().AnchorIndex.Values
+            .Where(t => t.Anchor.Scope == "body" && t.Anchor.Kind == "p")
+            .ToList();
+        // Delete B, C, D (indices 1..3 inclusive). DeleteRange's "to" is exclusive,
+        // so pass anchor[1] as from and anchor[4] as toExclusive.
+        var r = session.DeleteRange(body[1].Anchor.Id, body[4].Anchor.Id);
+        Assert.True(r.Success);
+        Assert.Equal(3, r.Removed.Count);
+
+        var afterMd = session.Project().Markdown;
+        Assert.Contains("Paragraph A", afterMd);
+        Assert.DoesNotContain("Paragraph B", afterMd);
+        Assert.DoesNotContain("Paragraph C", afterMd);
+        Assert.DoesNotContain("Paragraph D", afterMd);
+        Assert.Contains("Paragraph E", afterMd);
+    }
+
+    [Fact]
+    public void DS261_DeleteRange_FromMustPrecedeToInDocumentOrder()
+    {
+        using var session = new DocxSession(BuildDocFiveBodyParagraphs());
+        var body = session.Project().AnchorIndex.Values
+            .Where(t => t.Anchor.Scope == "body" && t.Anchor.Kind == "p")
+            .ToList();
+        // Reversed args: from = E, to = B (from comes after to)
+        var r = session.DeleteRange(body[4].Anchor.Id, body[1].Anchor.Id);
+        Assert.False(r.Success);
+        Assert.Equal(EditErrorCode.InvalidPosition, r.Error?.Code);
+    }
+
+    [Fact]
+    public void DS262_DeleteRange_UnknownFromAnchorReturnsAnchorNotFound()
+    {
+        using var session = new DocxSession(BuildDocFiveBodyParagraphs());
+        var body = session.Project().AnchorIndex.Values
+            .First(t => t.Anchor.Scope == "body" && t.Anchor.Kind == "p");
+        var r = session.DeleteRange("p:body:0000000000000000ffffffffffffffff", body.Anchor.Id);
+        Assert.False(r.Success);
+        Assert.Equal(EditErrorCode.AnchorNotFound, r.Error?.Code);
+    }
+
+    [Fact]
+    public void DS263_DeleteRange_WrongKindReturnsAnchorWrongKind()
+    {
+        using var session = new DocxSession(BuildDocFiveBodyParagraphs());
+        var body = session.Project().AnchorIndex.Values
+            .First(t => t.Anchor.Scope == "body" && t.Anchor.Kind == "p");
+        var sec = session.Project().AnchorIndex.Values
+            .FirstOrDefault(t => t.Anchor.Kind == "sec");
+        if (sec is null) return;   // Five-paragraph fixture may have no sectPr; skip the assertion if so.
+        var r = session.DeleteRange(body.Anchor.Id, sec.Anchor.Id);
+        Assert.False(r.Success);
+        Assert.Equal(EditErrorCode.AnchorWrongKind, r.Error?.Code);
+    }
+
+    [Fact]
+    public void DS264_DeleteRange_AnchorsInDifferentPartsRefused()
+    {
+        // Use the FootnotesPart fixture from #162 to get a fn-scope anchor.
+        using var session = new DocxSession(BuildDocWithFootnotes());
+        var bodyAnchor = session.Project().AnchorIndex.Values
+            .First(t => t.Anchor.Scope == "body" && t.Anchor.Kind == "p").Anchor.Id;
+        var fnAnchor = session.Project().AnchorIndex.Values
+            .First(t => t.Anchor.Scope == "fn" && t.Anchor.Kind == "fn").Anchor.Id;
+        var r = session.DeleteRange(bodyAnchor, fnAnchor);
+        Assert.False(r.Success);
+        Assert.Equal(EditErrorCode.AnchorsNotAdjacent, r.Error?.Code);
+    }
+
+    [Fact]
+    public void DS265_DeleteRange_UndoRestoresEntireRange()
+    {
+        using var session = new DocxSession(BuildDocFiveBodyParagraphs());
+        var body = session.Project().AnchorIndex.Values
+            .Where(t => t.Anchor.Scope == "body" && t.Anchor.Kind == "p")
+            .ToList();
+        var r = session.DeleteRange(body[1].Anchor.Id, body[4].Anchor.Id);
+        Assert.True(r.Success);
+
+        var undo = session.Undo();
+        Assert.True(undo);
+
+        var afterMd = session.Project().Markdown;
+        Assert.Contains("Paragraph A", afterMd);
+        Assert.Contains("Paragraph B", afterMd);
+        Assert.Contains("Paragraph C", afterMd);
+        Assert.Contains("Paragraph D", afterMd);
+        Assert.Contains("Paragraph E", afterMd);
+    }
 }
