@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **`AnchorTarget.AutoNumberPrefix` + `FullText`, mirrored on `AnchorInfo`.** Paragraphs / headings / list items in the body that carry numbering (inline `w:numPr` or numbering inherited from a style) now expose Word's resolved numbering label — `"1."`, `"1.1"`, `"First"`, etc. — as `AutoNumberPrefix` on the projection's `AnchorTarget` and on the `AnchorInfo` returned by `GetAnchorInfo` / `GetAnchorInfos`. `FullText` is a derived convenience that joins prefix + `TextPreview` with a space when a prefix is present. Closes the foot-gun where a caller could see `"# First The total…"` in the markdown projection but a `Grep`/`FindByText` for `"First"` would silently miss it (run text contains only `"The total…"`). The prefix is *not* added to `TextPreview` and is *not* searchable via `Grep` — `Grep` continues to walk run text only — but callers iterating `AnchorIndex` for previews or building search facets now have the rendered label available without re-resolving numbering. Mirrored on the WASM bridge (`MarkdownAnchorTargetDto`, `AnchorInfo` serializers) and the npm wrapper types. Body-only in v1 — header/footer numbering paths aren't routed through `ListItemRetriever` yet. Tests: `DS222`, `DS222a`, `DS222b`.
+
 ### Fixed
 - **`tools/python-host/pyhost.csproj` — suppress StyleCop SA1633/SA1636 file-header rules** (issue #173). `dotnet build -c Release tools/python-host/pyhost.csproj` was failing because `Directory.Build.props` sets `TreatWarningsAsErrors=true` for Release and the python-host project inherited the StyleCop ruleset without suppressing the file-header warnings on `Dispatcher.cs` and `Program.cs`. Added `<NoWarn>$(NoWarn);SA1633;SA1636</NoWarn>` to the csproj, matching the existing convention in `wasm/DocxodusWasm/DocxodusWasm.csproj` for tooling/wasm subprojects.
 
