@@ -165,11 +165,21 @@ public enum AnchorIdRendering
 
 /// <summary>
 /// Identifies a single addressable element in the markdown projection.
-/// Anchor ids have the form <c>kind:scope:unid</c> (e.g. <c>p:body:a1b2c3d4</c>).
+/// Anchor ids have the form <c>kind:scope:unid</c> (e.g.
+/// <c>p:body:a1b2c3d4e5f6789012345678901234ab</c> — the example is the canonical
+/// 32-char hex Unid form; abbreviated/sequential renderings may shorten it).
 /// </summary>
 public readonly record struct Anchor(string Id, string Kind, string Scope, string Unid)
 {
-    /// <summary>The block-level token rendered in the projection (e.g. <c>{#p:body:a1b2c3d4}</c>).</summary>
+    /// <summary>
+    /// The canonical block-level token built from <see cref="Id"/> (e.g.
+    /// <c>{#p:body:a1b2c3d4e5f6789012345678901234ab}</c>). Always uses the full
+    /// Unid form regardless of the projection's
+    /// <see cref="WmlToMarkdownConverterSettings.AnchorIdRendering"/> setting —
+    /// for the actually-rendered token in <see cref="MarkdownProjection.Markdown"/>,
+    /// the rendered id is in the markdown text and the dual-keyed
+    /// <see cref="MarkdownProjection.AnchorIndex"/> resolves either form.
+    /// </summary>
     public string Token => $"{{#{Id}}}";
 }
 

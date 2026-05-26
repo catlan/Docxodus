@@ -1031,13 +1031,16 @@ public class WmlToMarkdownConverterTests
         };
         var projection = WmlToMarkdownConverter.Convert(wml, settings);
 
-        // All emitted tokens are < 32 chars in their unid portion, and >= 4.
+        // All emitted tokens are exactly 4 chars in their unid portion: for
+        // BuildDS001_SimpleTwoParagraphs (2 anchors per (kind, scope) bucket
+        // with full hex Unids), the shortest-unique-prefix algorithm always
+        // picks the 4-char floor.
         foreach (System.Text.RegularExpressions.Match m in
                  System.Text.RegularExpressions.Regex.Matches(projection.Markdown, @"\{#[^:]+:[^:]+:([a-f0-9]+)\}"))
         {
             var unid = m.Groups[1].Value;
             Assert.True(unid.Length >= 4, $"abbreviation '{unid}' shorter than 4-char floor");
-            Assert.True(unid.Length < 32, $"abbreviation '{unid}' wasn't actually abbreviated");
+            Assert.Equal(4, unid.Length);
         }
     }
 
@@ -1072,10 +1075,12 @@ public class WmlToMarkdownConverterTests
         Assert.True(projection.AnchorIndex.ContainsKey(abbreviatedKey),
             $"abbreviated key '{abbreviatedKey}' missing from index");
 
-        // Both keys resolve to AnchorTarget whose underlying Unid matches.
+        // Both keys resolve to the SAME AnchorTarget instance — reference identity
+        // is the load-bearing invariant (a future change that accidentally copied
+        // the target into both slots would fail loudly here).
         var fromFull = projection.AnchorIndex[fullKey];
         var fromAbbreviated = projection.AnchorIndex[abbreviatedKey];
-        Assert.Equal(fromFull.Unid, fromAbbreviated.Unid);
+        Assert.Same(fromFull, fromAbbreviated);
     }
 
     [Fact]
