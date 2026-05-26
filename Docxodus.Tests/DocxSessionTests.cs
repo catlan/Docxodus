@@ -2755,7 +2755,7 @@ public class DocxSessionTests
     }
 
     [Fact]
-    public void DS280_AnchorsByScope_BodyByDefault()
+    public void DS290_AnchorsByScope_BodyByDefault()
     {
         using var session = new DocxSession(BuildDocWithHeaderAndFooter());
         var bodyAnchors = session.AnchorsByScope(ProjectionScopes.Body);
@@ -2764,7 +2764,7 @@ public class DocxSessionTests
     }
 
     [Fact]
-    public void DS281_AnchorsByScope_HeadersFootersCompose()
+    public void DS291_AnchorsByScope_HeadersFootersCompose()
     {
         using var session = new DocxSession(BuildDocWithHeaderAndFooter());
         var hdrFtr = session.AnchorsByScope(ProjectionScopes.Headers | ProjectionScopes.Footers);
@@ -2777,7 +2777,7 @@ public class DocxSessionTests
     }
 
     [Fact]
-    public void DS282_FindOptions_Scopes_NarrowsFindAllByText()
+    public void DS292_FindOptions_Scopes_NarrowsFindAllByText()
     {
         // Default Scopes = All. FindAllByText sees the body, header, and footer needles.
         using var session = new DocxSession(BuildDocWithHeaderAndFooter());
@@ -2797,7 +2797,7 @@ public class DocxSessionTests
     }
 
     [Fact]
-    public void DS283_FindOptions_ScopeFilter_StringStillNarrowsWithinScopes()
+    public void DS293_FindOptions_ScopeFilter_StringStillNarrowsWithinScopes()
     {
         // Scopes selects Headers + Footers; ScopeFilter pins one specific part.
         // The fine-grained string ScopeFilter is still respected as a further narrow.
@@ -2812,7 +2812,7 @@ public class DocxSessionTests
     }
 
     [Fact]
-    public void DS284_ProjectionScopesExtensions_IncludesScopeRoundtrip()
+    public void DS294_ProjectionScopesExtensions_IncludesScopeRoundtrip()
     {
         // Cheap unit test for the helper — body, hdr*, ftr*, fn, en, cmt all map.
         Assert.True(ProjectionScopes.Body.IncludesScope("body"));
@@ -2829,6 +2829,8 @@ public class DocxSessionTests
         Assert.True(bodyHdr.IncludesScope("body"));
         Assert.True(bodyHdr.IncludesScope("hdr3"));
         Assert.False(bodyHdr.IncludesScope("fn"));
+    }
+
     // ─── GetEditSummary (issue #166 — DS280-DS283) ────────────────────────
 
     [Fact]
