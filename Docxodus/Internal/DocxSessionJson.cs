@@ -156,6 +156,19 @@ internal static class DocxSessionJson
         _ => "unknown",
     };
 
+    public static string SerializeEditSummary(EditSummary summary)
+    {
+        var sb = new StringBuilder(1024);
+        sb.Append("{\"totalAnchors\":").Append(summary.TotalAnchors)
+          .Append(",\"remainingPlaceholders\":").Append(SerializePlaceholders(summary.RemainingPlaceholders))
+          .Append(",\"bareUnderscoreRuns\":").Append(SerializeMatches(summary.BareUnderscoreRuns))
+          .Append(",\"footnoteCount\":").Append(summary.FootnoteCount)
+          .Append(",\"inlineFootnoteRefCount\":").Append(summary.InlineFootnoteRefCount)
+          .Append(",\"commentCount\":").Append(summary.CommentCount)
+          .Append('}');
+        return sb.ToString();
+    }
+
     public static string SerializePlaceholders(IReadOnlyList<TemplatePlaceholder> placeholders)
     {
         var sb = new StringBuilder(512);
