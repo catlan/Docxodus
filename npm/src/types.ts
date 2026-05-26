@@ -64,6 +64,47 @@ export enum EmptyParagraphMode {
 }
 
 /**
+ * How anchor ids are rendered inside `{#…}` tokens (and keyed in
+ * {@link MarkdownProjection.anchorIndex}). Mirrors the .NET
+ * `Docxodus.AnchorIdRendering` enum.
+ *
+ * `Anchor.token` (and any `AnchorRef` returned by `DocxSession` mutations)
+ * always carries the full Unid regardless of rendering — the choice only
+ * affects the markdown text. The returned `anchorIndex` is dual-keyed so
+ * lookups by either the rendered id or the full Unid work for the
+ * `Abbreviated`/`Sequential` modes.
+ */
+export enum AnchorIdRendering {
+  /** Full 32-char hex Unid (default; e.g. `{#h:body:a1b2c3d4e5f6789012345678901234ab}`). */
+  FullUnid = 0,
+  /** Shortest unique prefix per (kind, scope) bucket, 4-char floor (e.g. `{#h:body:a1b2}`).
+   *  Saves 5-10% of projection-token budget for LLM consumption. */
+  Abbreviated = 1,
+  /** Sequential numeric ids per (kind, scope) bucket in document order (e.g. `{#h:body:1}`).
+   *  Maximally token-efficient for one-shot LLM contexts. NOT stable across
+   *  `project()` calls and must NOT be persisted. */
+  Sequential = 2,
+}
+
+/**
+ * How far below the target anchor to include in
+ * {@link DocxSession.projectAnchor}. Mirrors the .NET
+ * `Docxodus.ProjectionDepth` enum.
+ */
+export enum ProjectionDepth {
+  /** Just the target block itself (its anchor + its own text). For headings,
+   *  returns only the heading paragraph, not the section under it. */
+  SelfOnly = 0,
+  /** Self + descendants. Most useful for `tbl` anchors (returns the whole table);
+   *  for paragraphs it's the same as `SelfOnly`. */
+  Subtree = 1,
+  /** Self + descendants + following siblings up to (but not including) the next
+   *  sibling at the same or higher heading level. For non-heading anchors,
+   *  equivalent to `Subtree`. Dominant "give me this section" case; the default. */
+  SubtreeAndFollowingSiblings = 2,
+}
+
+/**
  * Settings controlling the markdown projection. Mirrors the .NET
  * `WmlToMarkdownConverterSettings` class — see `docs/architecture/markdown_projection.md`.
  */
@@ -76,6 +117,16 @@ export interface MarkdownProjectionSettings {
   trackedChanges?: TrackedChangeMode;
   resolveNumbering?: boolean;
   emptyParagraphs?: EmptyParagraphMode;
+  /**
+   * How anchor ids are rendered in markdown output. Default `FullUnid`.
+   * Set to `Abbreviated` for terse LLM-friendly ids; `Sequential` for
+   * 1-based per-scope counters (best for replay logs / human review).
+   * `Anchor.token` (and any `AnchorRef`) always reflects the full Unid
+   * regardless; this only affects the markdown text. Use the returned
+   * {@link MarkdownProjection.anchorIndex} (dual-keyed for Abbreviated /
+   * Sequential) to translate rendered ids back to full Unids.
+   */
+  anchorIdRendering?: AnchorIdRendering;
 }
 
 /**
@@ -670,6 +721,7 @@ export interface DocxodusWasmExports {
     OpenSession: (bytes: Uint8Array, settingsJson: string) => number;
     CloseSession: (handle: number) => void;
     Project: (handle: number) => string;
+    ProjectAnchor: (handle: number, anchorId: string, depth: number) => string;
     ReplaceText: (handle: number, anchor: string, md: string) => string;
     DeleteBlock: (handle: number, anchor: string) => string;
     DeleteRange: (handle: number, fromAnchorId: string, toAnchorIdExclusive: string) => string;

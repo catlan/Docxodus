@@ -23,7 +23,7 @@ import type {
   TemplatePlaceholder,
   TextMatch,
 } from "./types.js";
-import { ContextBoundary, DiffFormat, PlaceholderKinds } from "./types.js";
+import { ContextBoundary, DiffFormat, PlaceholderKinds, ProjectionDepth } from "./types.js";
 
 /**
  * Stateful in-memory DOCX editing session keyed by markdown-projection anchor ids.
@@ -48,6 +48,30 @@ export class DocxSession {
 
   project(): DocxSessionProjection {
     return JSON.parse(this.wasm.Project(this.handle)) as DocxSessionProjection;
+  }
+
+  /**
+   * Project a slice of the document keyed off an anchor — useful for showing
+   * one section to an LLM at a time without paying the cost of projecting the
+   * whole document.
+   *
+   * - `ProjectionDepth.SelfOnly` — just the addressed block (one paragraph,
+   *   row, etc.).
+   * - `ProjectionDepth.Subtree` — the block + descendants (e.g. a table with
+   *   all its rows/cells, but no following content).
+   * - `ProjectionDepth.SubtreeAndFollowingSiblings` (default) — for headings
+   *   this returns the whole section (heading + content up to the next same-
+   *   or-higher heading); for non-headings it behaves like `Subtree`.
+   *
+   * @see docs/architecture/docx_mutation_api.md
+   */
+  projectAnchor(
+    anchorId: string,
+    depth: ProjectionDepth = ProjectionDepth.SubtreeAndFollowingSiblings,
+  ): DocxSessionProjection {
+    return JSON.parse(
+      this.wasm.ProjectAnchor(this.handle, anchorId, depth),
+    ) as DocxSessionProjection;
   }
 
   // ─── Tier A: text CRUD ───────────────────────────────────────────────
