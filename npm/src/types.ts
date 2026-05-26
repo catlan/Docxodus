@@ -672,6 +672,8 @@ export interface DocxodusWasmExports {
     Project: (handle: number) => string;
     ReplaceText: (handle: number, anchor: string, md: string) => string;
     DeleteBlock: (handle: number, anchor: string) => string;
+    DeleteRange: (handle: number, fromAnchorId: string, toAnchorIdExclusive: string) => string;
+    DeleteSection: (handle: number, headingAnchorId: string) => string;
     InsertParagraph: (handle: number, anchor: string, pos: string, md: string) => string;
     SplitParagraph: (handle: number, anchor: string, offset: number) => string;
     MergeParagraphs: (handle: number, first: string, second: string) => string;
