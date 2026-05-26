@@ -38,6 +38,9 @@ internal static class DocxSessionJson
         bool persistAnchorIds = TryGetBool(root, "persistAnchorIds", false);
         bool smartQuotes = TryGetBool(root, "smartQuotes", false);
         bool captureInitialProjection = TryGetBool(root, "captureInitialProjection", true);
+        var projectionSettings = root.TryGetProperty("projectionSettings", out var ps) && ps.ValueKind == JsonValueKind.Object
+            ? ParseProjectionSettings(ps)
+            : new WmlToMarkdownConverterSettings();
         return new DocxSessionSettings
         {
             UndoDepth = undoDepth,
@@ -47,7 +50,40 @@ internal static class DocxSessionJson
             PersistAnchorIds = persistAnchorIds,
             SmartQuotes = smartQuotes,
             CaptureInitialProjection = captureInitialProjection,
+            ProjectionSettings = projectionSettings,
         };
+    }
+
+    /// <summary>
+    /// Parse a JSON object into <see cref="WmlToMarkdownConverterSettings"/>. Mirrors
+    /// the <c>MarkdownProjectionSettings</c> TS interface and the
+    /// <c>MarkdownProjectionSettingsDto</c> WASM DTO — numeric enum fields use the
+    /// same flag/value layout as the .NET enums. Unknown / missing fields fall back
+    /// to <see cref="WmlToMarkdownConverterSettings"/> defaults.
+    /// </summary>
+    public static WmlToMarkdownConverterSettings ParseProjectionSettings(JsonElement root)
+    {
+        var settings = new WmlToMarkdownConverterSettings();
+        if (root.ValueKind != JsonValueKind.Object) return settings;
+        if (root.TryGetProperty("scopes", out var sc) && sc.ValueKind == JsonValueKind.Number)
+            settings.Scopes = (ProjectionScopes)sc.GetInt32();
+        if (root.TryGetProperty("headingLevelOffset", out var hl) && hl.ValueKind == JsonValueKind.Number)
+            settings.HeadingLevelOffset = hl.GetInt32();
+        if (root.TryGetProperty("anchorMode", out var am) && am.ValueKind == JsonValueKind.Number)
+            settings.AnchorMode = (AnchorRenderMode)am.GetInt32();
+        if (root.TryGetProperty("tableMode", out var tm) && tm.ValueKind == JsonValueKind.Number)
+            settings.TableMode = (TableRenderMode)tm.GetInt32();
+        if (root.TryGetProperty("tableInlineCellMax", out var tic) && tic.ValueKind == JsonValueKind.Number)
+            settings.TableInlineCellMax = tic.GetInt32();
+        if (root.TryGetProperty("trackedChanges", out var tc) && tc.ValueKind == JsonValueKind.Number)
+            settings.TrackedChanges = (TrackedChangeMode)tc.GetInt32();
+        if (root.TryGetProperty("resolveNumbering", out var rn) && (rn.ValueKind == JsonValueKind.True || rn.ValueKind == JsonValueKind.False))
+            settings.ResolveNumbering = rn.GetBoolean();
+        if (root.TryGetProperty("emptyParagraphs", out var ep) && ep.ValueKind == JsonValueKind.Number)
+            settings.EmptyParagraphs = (EmptyParagraphMode)ep.GetInt32();
+        if (root.TryGetProperty("anchorIdRendering", out var air) && air.ValueKind == JsonValueKind.Number)
+            settings.AnchorIdRendering = (AnchorIdRendering)air.GetInt32();
+        return settings;
     }
 
     public static FormatOp ParseFormatOp(string json)

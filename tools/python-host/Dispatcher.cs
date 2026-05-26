@@ -29,6 +29,9 @@ internal static class Dispatcher
         "close_session" => CloseSession(args),
         "save" => Save(args),
         "project" => DocxSessionOps.Project(Handle(args)),
+        "project_anchor" => DocxSessionOps.ProjectAnchor(
+            Handle(args), Str(args, "anchorId"),
+            (ProjectionDepth)IntOptional(args, "depth", 2)),
 
         "replace_text" => DocxSessionOps.ReplaceText(Handle(args), Str(args, "anchorId"), Str(args, "markdown")),
         "delete_block" => DocxSessionOps.DeleteBlock(Handle(args), Str(args, "anchorId")),
