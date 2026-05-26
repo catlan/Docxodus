@@ -705,6 +705,9 @@ export interface DocxodusWasmExports {
       newInner: string,
     ) => string;
     FindPlaceholders: (handle: number, kinds: number, scope: number, contextChars: number, boundary: number) => string;
+    GetEditSummary: (handle: number) => string;
+    RemainingPlaceholders: (handle: number, kinds: number) => string;
+    GetDiff: (handle: number, format: number) => string;
     FindByAnnotation: (handle: number, annotationId: string) => string;
     FindByLabel: (handle: number, labelId: string) => string;
     FindByBookmark: (handle: number, bookmarkName: string) => string;
@@ -805,6 +808,12 @@ export interface DocxSessionSettings {
    * straight-quoted text adjacent to surrounding already-curly text. Default false.
    */
   smartQuotes?: boolean;
+  /**
+   * When `true` (default), the session projects the document at construction
+   * time so {@link DocxSession.getDiff} can compare initial vs. current.
+   * Set to `false` to skip the ~200ms upfront cost if you don't plan to diff.
+   */
+  captureInitialProjection?: boolean;
 }
 
 export interface DocxSessionProjection {
@@ -923,6 +932,45 @@ export const PlaceholderKinds = {
 } as const;
 
 /**
+ * Numeric flag layout matching the .NET `DiffFormat` enum. Use with
+ * {@link DocxSession.getDiff}.
+ *
+ * - `Json` (default) — anchor-keyed structured diff. Returns a `DiffEntry[]`.
+ * - `Unified` — git-style unified diff. **Deferred to v2; throws.**
+ * - `SideBySide` — two-column human-review diff. **Deferred to v2; throws.**
+ */
+export const DiffFormat = {
+  Json: 0,
+  Unified: 1,
+  SideBySide: 2,
+} as const;
+
+/**
+ * A single anchor-keyed change in the diff between an initial and current projection.
+ */
+export interface DiffEntry {
+  op: "delete" | "insert" | "modify";
+  anchorId: string;
+  /** Pre-change text content for delete/modify; absent for insert. */
+  before?: string;
+  /** Post-change text content for insert/modify; absent for delete. */
+  after?: string;
+}
+
+/**
+ * Aggregate snapshot of edit-state introspection signals returned by
+ * {@link DocxSession.getEditSummary}.
+ */
+export interface EditSummary {
+  totalAnchors: number;
+  remainingPlaceholders: TemplatePlaceholder[];
+  bareUnderscoreRuns: TextMatch[];
+  footnoteCount: number;
+  inlineFootnoteRefCount: number;
+  commentCount: number;
+}
+
+/**
  * Numeric flag layout matching the .NET `ContextBoundary` enum. Controls
  * how `Grep` / `GrepCrossBlock` / `FindPlaceholders` decide where to stop
  * walking outward when computing `TextMatch.contextBefore` / `contextAfter`.
@@ -959,7 +1007,10 @@ export interface TemplatePlaceholder {
  * Options for {@link DocxSession.fillPlaceholders}.
  */
 export interface FillOptions {
-  /** Which placeholder kinds to fill. Defaults to `BlankFill | Instruction`. */
+  /** Which placeholder kinds to fill. Defaults to `PlaceholderKinds.All` so the
+   *  picker is invoked for every kind in the doc. Narrow with e.g.
+   *  `PlaceholderKinds.BlankFill | PlaceholderKinds.Instruction` to ignore
+   *  bracketed alternative clauses. */
   kinds?: number;
   /** Which package parts to scan. Defaults to body (1). */
   scope?: number;
