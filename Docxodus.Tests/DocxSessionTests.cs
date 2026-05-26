@@ -2800,6 +2800,24 @@ public class DocxSessionTests
     }
 
     [Fact]
+    public void DS285b_GetDiff_DetectsKindChangeWithoutTextChange()
+    {
+        // SetParagraphStyle flips anchor kind (p→h) without changing text.
+        // ComputeDiff must detect this as a modify, not silently miss it.
+        // Uses BuildDS001_SimpleTwoParagraphs because it ships with the heading
+        // style definitions that SetParagraphStyle needs.
+        using var session = new DocxSession(BuildDS001_SimpleTwoParagraphs());
+        var firstP = session.Project().AnchorIndex.Values
+            .First(t => t.Anchor.Scope == "body" && t.Anchor.Kind == "p");
+
+        var r = session.SetParagraphStyle(firstP.Anchor.Id, "Heading2");
+        Assert.True(r.Success);
+
+        var diffJson = session.GetDiff();
+        Assert.Contains("\"modify\"", diffJson);
+    }
+
+    [Fact]
     public void DS286_GetDiff_AfterReplaceText_ShowsModifyOp()
     {
         using var session = new DocxSession(BuildDocWithBracketPlaceholders());

@@ -1469,8 +1469,11 @@ public sealed class DocxSession : IDisposable
     /// <param name="format">Output shape. Only <see cref="DiffFormat.Json"/> is supported
     /// in v1; <see cref="DiffFormat.Unified"/> and <see cref="DiffFormat.SideBySide"/>
     /// are reserved enum values that throw <see cref="NotSupportedException"/>.</param>
-    /// <returns>JSON array of <see cref="DiffEntry"/> records. Returns <c>"[]"</c> when
-    /// the document has not been mutated since construction.</returns>
+    /// <returns>For <see cref="DiffFormat.Json"/>, a JSON array of <see cref="DiffEntry"/>
+    /// records. Entries are grouped by op (all deletes first, then modifies, then inserts);
+    /// within each group, by anchor-index iteration order (which is document order in
+    /// practice, since the projector builds the index via a depth-first descendant walk).
+    /// Returns <c>"[]"</c> when the document has not been mutated since construction.</returns>
     /// <exception cref="InvalidOperationException">Thrown when
     /// <see cref="DocxSessionSettings.CaptureInitialProjection"/> was <c>false</c>.</exception>
     /// <exception cref="NotSupportedException">Thrown for <paramref name="format"/> values
@@ -1510,11 +1513,15 @@ public sealed class DocxSession : IDisposable
             });
         }
 
-        // Modifies: present in both, text preview differs.
+        // Modifies: present in both, text preview OR kind differs.
+        // Kind can flip without a text change (e.g., SetParagraphStyle promoting
+        // a paragraph to a heading flips Anchor.Kind from "p" to "h" while
+        // preserving the Unid and TextPreview).
         foreach (var (unid, initialTarget) in initialByUnid)
         {
             if (!currentByUnid.TryGetValue(unid, out var currentTarget)) continue;
-            if (initialTarget.TextPreview == currentTarget.TextPreview) continue;
+            if (initialTarget.TextPreview == currentTarget.TextPreview
+                && initialTarget.Anchor.Kind == currentTarget.Anchor.Kind) continue;
             entries.Add(new DiffEntry
             {
                 Op = "modify",
