@@ -1771,6 +1771,175 @@ public sealed class DocxSession : IDisposable
     }
 
     /// <summary>
+    /// Deletes every top-level block-level element between <paramref name="fromAnchorId"/>
+    /// (inclusive) and <paramref name="toAnchorIdExclusive"/> (exclusive) in document order.
+    /// Both anchors must be block-level kinds (<c>p</c>, <c>h</c>, <c>li</c>, <c>tbl</c>),
+    /// live in the same package part, and share a direct parent (no spanning into table
+    /// cells or other nested containers). Records a single undo snapshot so
+    /// <see cref="Undo"/> restores the entire range together.
+    /// </summary>
+    /// <remarks>
+    /// In <see cref="TrackedChangeMode.RenderInline"/>, v1 still does a structural delete
+    /// (does not wrap runs in <c>w:del</c>). Track-changes wrapping for bulk deletes is
+    /// deferred — open a follow-up issue if a consumer needs it.
+    /// </remarks>
+    public EditResult DeleteRange(string fromAnchorId, string toAnchorIdExclusive)
+    {
+        if (_disposed) return EditResult.Fail(EditErrorCode.SessionDisposed, "session disposed");
+
+        var fromTarget = FindAnchor(fromAnchorId);
+        if (fromTarget is null)
+            return EditResult.Fail(EditErrorCode.AnchorNotFound, $"from anchor not found: {fromAnchorId}", fromAnchorId);
+        var toTarget = FindAnchor(toAnchorIdExclusive);
+        if (toTarget is null)
+            return EditResult.Fail(EditErrorCode.AnchorNotFound, $"to anchor not found: {toAnchorIdExclusive}", toAnchorIdExclusive);
+
+        // Scope (package-part) check first — different parts can't form a contiguous
+        // sibling range under any circumstance, even if the kinds look block-level.
+        if (fromTarget.Anchor.Scope != toTarget.Anchor.Scope)
+            return EditResult.Fail(EditErrorCode.AnchorsNotAdjacent,
+                $"DeleteRange anchors must live in the same package part; from={fromTarget.Anchor.Scope} to={toTarget.Anchor.Scope}",
+                fromAnchorId);
+
+        if (fromTarget.Anchor.Kind is not ("p" or "h" or "li" or "tbl"))
+            return EditResult.Fail(EditErrorCode.AnchorWrongKind,
+                $"DeleteRange requires block-level anchors; from kind={fromTarget.Anchor.Kind}", fromAnchorId);
+        if (toTarget.Anchor.Kind is not ("p" or "h" or "li" or "tbl"))
+            return EditResult.Fail(EditErrorCode.AnchorWrongKind,
+                $"DeleteRange requires block-level anchors; to kind={toTarget.Anchor.Kind}", toAnchorIdExclusive);
+
+        var fromElement = fromTarget.Resolve(_doc!);
+        var toElement = toTarget.Resolve(_doc!);
+        if (fromElement is null || toElement is null)
+            return EditResult.Fail(EditErrorCode.AnchorNotFound, "element resolved null", fromAnchorId);
+        if (fromElement.Parent != toElement.Parent)
+            return EditResult.Fail(EditErrorCode.AnchorsNotAdjacent,
+                "DeleteRange anchors must share a direct parent (no spanning into nested containers)",
+                fromAnchorId);
+
+        return DeleteSiblingRangeCore(fromTarget, fromElement, toElement);
+    }
+
+    /// <summary>
+    /// Deletes a heading and every block-level sibling under it, up to (but not including)
+    /// the next heading at the same or higher level. If no such next heading exists, the
+    /// section extends to the end of the parent (the heading and everything after it).
+    /// </summary>
+    /// <param name="headingAnchorId">Anchor id of the heading paragraph (kind must be <c>h</c>).</param>
+    /// <remarks>
+    /// "Level" is the same notion <see cref="WmlToMarkdownConverter"/> uses for the projection:
+    /// <c>Heading1</c> = 1, <c>Heading2</c> = 2, etc.; <c>Title</c> = 1, <c>Subtitle</c> = 2.
+    /// Tracked-change mode applies the same v1 limitation as <see cref="DeleteRange"/>:
+    /// structural delete regardless of <see cref="DocxSessionSettings.TrackedChanges"/>.
+    /// </remarks>
+    public EditResult DeleteSection(string headingAnchorId)
+    {
+        if (_disposed) return EditResult.Fail(EditErrorCode.SessionDisposed, "session disposed");
+
+        var headingTarget = FindAnchor(headingAnchorId);
+        if (headingTarget is null)
+            return EditResult.Fail(EditErrorCode.AnchorNotFound, $"heading anchor not found: {headingAnchorId}", headingAnchorId);
+        if (headingTarget.Anchor.Kind != "h")
+            return EditResult.Fail(EditErrorCode.AnchorWrongKind,
+                $"DeleteSection requires a heading anchor (kind=h); got kind={headingTarget.Anchor.Kind}",
+                headingAnchorId);
+
+        var headingElement = headingTarget.Resolve(_doc!);
+        if (headingElement is null)
+            return EditResult.Fail(EditErrorCode.AnchorNotFound, "heading element resolved null", headingAnchorId);
+
+        int level = WmlToMarkdownConverter.HeadingLevel(headingElement);
+
+        // Scan forward siblings for the next heading at level <= ours. If none, toElement
+        // stays null and DeleteSiblingRangeCore will delete to the end of the parent.
+        XElement? toElement = null;
+        foreach (var sibling in headingElement.ElementsAfterSelf())
+        {
+            if (sibling.Name == W.p && WmlToMarkdownConverter.IsHeading(sibling)
+                && WmlToMarkdownConverter.HeadingLevel(sibling) <= level)
+            {
+                toElement = sibling;
+                break;
+            }
+        }
+
+        return DeleteSiblingRangeCore(headingTarget, headingElement, toElement);
+    }
+
+    /// <summary>
+    /// Shared core for <see cref="DeleteRange"/> and <see cref="DeleteSection"/>.
+    /// Takes resolved XElement endpoints — <paramref name="toElementExclusive"/> may be
+    /// <c>null</c> to mean "delete to the end of the parent". Records one snapshot and
+    /// returns a single <see cref="EditResult"/> aggregating every removed anchor.
+    /// </summary>
+    private EditResult DeleteSiblingRangeCore(
+        AnchorTarget anchorForPatchScope,
+        XElement fromElement,
+        XElement? toElementExclusive)
+    {
+        // Walk siblings from `fromElement` forward, accumulating elements to remove.
+        var toRemove = new List<XElement>();
+        var current = (XElement?)fromElement;
+        while (current is not null && current != toElementExclusive)
+        {
+            toRemove.Add(current);
+            current = current.ElementsAfterSelf().FirstOrDefault();
+        }
+        if (toElementExclusive is not null && current != toElementExclusive)
+            return EditResult.Fail(EditErrorCode.InvalidPosition,
+                "'to' anchor does not follow 'from' in document order",
+                anchorForPatchScope.Anchor.Id);
+
+        _history.RecordPreOp(TakeSnapshot());
+        try
+        {
+            var index = Project().AnchorIndex;
+            var removed = new List<Anchor>();
+            foreach (var el in toRemove)
+            {
+                // Collect this element's anchor plus every descendant anchor.
+                CollectAnchorsForRemoval(el, index, removed);
+                el.Remove();
+            }
+            InvalidateProjectionCache();
+            return new EditResult
+            {
+                Success = true,
+                Removed = removed,
+                Patch = ProjectScope(anchorForPatchScope),
+            };
+        }
+        catch (Exception ex)
+        {
+            LastInternalError = ex;
+            _ = _history.PopForUndo();
+            return EditResult.Fail(EditErrorCode.InternalError, ex.Message, anchorForPatchScope.Anchor.Id);
+        }
+    }
+
+    private static void CollectAnchorsForRemoval(
+        XElement el,
+        IReadOnlyDictionary<string, AnchorTarget> index,
+        List<Anchor> removed)
+    {
+        var elUnid = (string?)el.Attribute(PtOpenXml.Unid);
+        if (elUnid is not null)
+        {
+            foreach (var kv in index)
+                if (kv.Value.Unid == elUnid)
+                    removed.Add(kv.Value.Anchor);
+        }
+        foreach (var desc in el.Descendants())
+        {
+            var dUnid = (string?)desc.Attribute(PtOpenXml.Unid);
+            if (dUnid is null) continue;
+            foreach (var kv in index)
+                if (kv.Value.Unid == dUnid)
+                    removed.Add(kv.Value.Anchor);
+        }
+    }
+
+    /// <summary>
     /// Strips every cross-reference pointing at the named footnote/endnote/comment id
     /// from every part of the package that can hold one. For footnotes/endnotes that's
     /// just <c>w:footnoteReference</c>/<c>w:endnoteReference</c>; for comments it's the

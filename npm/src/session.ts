@@ -58,6 +58,33 @@ export class DocxSession {
     return JSON.parse(this.wasm.DeleteBlock(this.handle, anchorId)) as EditResult;
   }
 
+  /**
+   * Delete every top-level block-level sibling between `fromAnchorId` (inclusive)
+   * and `toAnchorIdExclusive` (exclusive). Both anchors must share a direct
+   * parent and live in the same package part. Returns a single `EditResult`
+   * whose `removed` lists every anchor that was deleted.
+   *
+   * Records ONE undo snapshot — `undo()` restores the entire range.
+   *
+   * @see docs/architecture/docx_mutation_api.md#deleterange
+   */
+  deleteRange(fromAnchorId: string, toAnchorIdExclusive: string): EditResult {
+    return JSON.parse(this.wasm.DeleteRange(this.handle, fromAnchorId, toAnchorIdExclusive)) as EditResult;
+  }
+
+  /**
+   * Delete a heading and everything below it up to (but not including) the next
+   * heading at the same or higher level. The heading anchor must have `kind === "h"`.
+   *
+   * If the target is the last heading in its parent, the section extends to the
+   * end of the parent (heading + everything after).
+   *
+   * @see docs/architecture/docx_mutation_api.md#deletesection
+   */
+  deleteSection(headingAnchorId: string): EditResult {
+    return JSON.parse(this.wasm.DeleteSection(this.handle, headingAnchorId)) as EditResult;
+  }
+
   // ─── Tier B: structural ──────────────────────────────────────────────
 
   insertParagraph(anchorId: string, position: "before" | "after", markdown: string): EditResult {
