@@ -1033,6 +1033,68 @@ public sealed class DocxSession : IDisposable
     }
 
     /// <summary>
+    /// Resolves block-level metadata (style id + name, outline level, list
+    /// membership, formatting probe) for <paramref name="anchorId"/>. Returns
+    /// <c>null</c> when the anchor doesn't exist. See <see cref="BlockMetadata"/>
+    /// for the field reference.
+    /// </summary>
+    public BlockMetadata? GetBlockMetadata(string anchorId)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(anchorId);
+        var target = FindAnchor(anchorId);
+        return target is null ? null : Internal.BlockMetadataOps.GetBlockMetadata(_doc!, target);
+    }
+
+    /// <summary>
+    /// Bulk variant of <see cref="GetBlockMetadata"/>. Unknown anchor ids map
+    /// to <c>null</c>; duplicate ids are deduped; iteration order matches
+    /// input order for keys that appear first.
+    /// </summary>
+    public IReadOnlyDictionary<string, BlockMetadata?> GetBlockMetadatas(IEnumerable<string> anchorIds)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(anchorIds);
+
+        var result = new Dictionary<string, BlockMetadata?>(StringComparer.Ordinal);
+        foreach (var id in anchorIds)
+        {
+            if (id is null) continue;
+            if (result.ContainsKey(id)) continue;
+            var target = FindAnchor(id);
+            result[id] = target is null ? null : Internal.BlockMetadataOps.GetBlockMetadata(_doc!, target);
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Resolves the <see cref="ListMembership"/> for a list-item paragraph;
+    /// returns <c>null</c> when the anchor has no <c>w:numPr</c> (inline or
+    /// inherited from style) or doesn't exist.
+    /// </summary>
+    public ListMembership? GetListMembership(string anchorId)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(anchorId);
+        var target = FindAnchor(anchorId);
+        return target is null ? null : Internal.BlockMetadataOps.GetListMembership(_doc!, target);
+    }
+
+    /// <summary>
+    /// Resolves the <see cref="SectionInfo"/> for the <c>w:sectPr</c> that
+    /// governs <paramref name="anchorId"/>. Returns <c>null</c> when the
+    /// anchor lives outside the body part (footnotes, endnotes, headers,
+    /// footers, comments) or doesn't exist.
+    /// </summary>
+    public SectionInfo? GetSectionInfo(string anchorId)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(anchorId);
+        var target = FindAnchor(anchorId);
+        return target is null ? null : Internal.BlockMetadataOps.GetSectionInfo(_doc!, target);
+    }
+
+    /// <summary>
     /// Searches the flat text of every paragraph/heading/list-item in <paramref name="scope"/>
     /// for matches of <paramref name="pattern"/> and returns them in document order, each
     /// with the run fragments it spans. The fragment list lets callers rewrite a match in
