@@ -451,6 +451,121 @@ public sealed record AnchorInfo(string Id, string Kind, string Scope, string Tex
 }
 
 /// <summary>
+/// The six list formats supported by the list write surface
+/// (<c>InsertNumberedList</c>, <c>ConvertToNumberedList</c>, …) and
+/// surfaced on <see cref="ListMembership.Format"/>. Maps to OOXML
+/// <c>w:numFmt</c> values: <c>Decimal</c> → <c>decimal</c>,
+/// <c>UpperLetter</c> → <c>upperLetter</c>, <c>LowerLetter</c> →
+/// <c>lowerLetter</c>, <c>UpperRoman</c> → <c>upperRoman</c>,
+/// <c>LowerRoman</c> → <c>lowerRoman</c>, <c>Bullet</c> → <c>bullet</c>.
+/// Other OOXML formats resolve to <c>Decimal</c> (the safest fallback).
+/// </summary>
+public enum NumberFormat
+{
+    Decimal,
+    UpperLetter,
+    LowerLetter,
+    UpperRoman,
+    LowerRoman,
+    Bullet,
+}
+
+/// <summary>
+/// Numbering facts for a list-item paragraph. Returned by
+/// <see cref="DocxSession.GetListMembership"/> and surfaced as
+/// <see cref="BlockMetadata.List"/>.
+/// </summary>
+public sealed record ListMembership
+{
+    /// <summary>The <c>w:numId</c> the paragraph belongs to (the <c>w:num</c> instance).</summary>
+    required public int NumId { get; init; }
+
+    /// <summary>The <c>w:abstractNumId</c> the paragraph's <c>w:num</c> points at (the format template).</summary>
+    required public int AbstractNumId { get; init; }
+
+    /// <summary>The paragraph's level (<c>w:ilvl</c>), 0-8.</summary>
+    required public int Level { get; init; }
+
+    /// <summary>The resolved <see cref="NumberFormat"/> for this paragraph's level.</summary>
+    required public NumberFormat Format { get; init; }
+
+    /// <summary>The start-override applied to this paragraph's level via
+    /// <c>w:lvlOverride/w:startOverride</c>, if any. <c>null</c> when no override is in effect.</summary>
+    public int? StartOverride { get; init; }
+
+    /// <summary>Always <c>true</c> for a paragraph carrying <c>w:numPr</c> (inline or via style).</summary>
+    required public bool IsAutoNumbered { get; init; }
+
+    /// <summary><c>true</c> when the <c>w:numPr</c> is inherited from the paragraph style chain
+    /// rather than set directly on the paragraph. <c>false</c> when set inline on the paragraph.</summary>
+    required public bool FromStyle { get; init; }
+
+    /// <summary>The rendered auto-number prefix (e.g. <c>"1."</c>, <c>"(a)"</c>) — same value
+    /// surfaced as <see cref="AnchorInfo.AutoNumberPrefix"/>. Duplicated here so callers don't
+    /// have to take two round-trips.</summary>
+    public string? GeneratedLabel { get; init; }
+}
+
+/// <summary>
+/// Block-level structural metadata. Returned by <see cref="DocxSession.GetBlockMetadata"/>.
+/// </summary>
+public sealed record BlockMetadata
+{
+    required public string AnchorId { get; init; }
+    required public string Kind { get; init; }
+    required public string Scope { get; init; }
+
+    /// <summary>The <c>w:pStyle/@w:val</c> for paragraph kinds, or <c>w:tblStyle</c> for tables.
+    /// <c>null</c> when no style is applied.</summary>
+    public string? StyleId { get; init; }
+
+    /// <summary>Resolved <c>w:name/@w:val</c> for <see cref="StyleId"/> from the styles part.
+    /// <c>null</c> when styles part is absent or the style isn't defined.</summary>
+    public string? StyleName { get; init; }
+
+    /// <summary>Outline level: <c>w:pPr/w:outlineLvl</c> when present; otherwise
+    /// inferred from a Heading1..Heading9 style (level 0..8); <c>null</c> otherwise.
+    /// Word's outlineLvl is 0-based (0 = top heading).</summary>
+    public int? OutlineLevel { get; init; }
+
+    /// <summary>Populated for list-item paragraphs; <c>null</c> otherwise.</summary>
+    public ListMembership? List { get; init; }
+
+    /// <summary><c>true</c> when any descendant <c>w:r</c> carries a non-empty <c>w:rPr</c>
+    /// (bold, italic, color, run style, etc.). Coarse but useful as a "does this paragraph
+    /// have inline formatting at all?" probe.</summary>
+    required public bool HasInlineFormatting { get; init; }
+}
+
+/// <summary>
+/// Page-layout snapshot for the <c>w:sectPr</c> that governs an anchor.
+/// Returned by <see cref="DocxSession.GetSectionInfo"/>; <c>null</c> for
+/// anchors outside the body part (footnotes/endnotes/headers/footers/comments).
+/// </summary>
+public sealed record SectionInfo
+{
+    /// <summary>The Unid of the <c>w:sectPr</c> element this info describes. Stable across mutations.</summary>
+    required public string SectionUnid { get; init; }
+
+    required public double PageWidthTwips { get; init; }
+    required public double PageHeightTwips { get; init; }
+    required public bool Landscape { get; init; }
+    required public double MarginTopTwips { get; init; }
+    required public double MarginBottomTwips { get; init; }
+    required public double MarginLeftTwips { get; init; }
+    required public double MarginRightTwips { get; init; }
+
+    /// <summary>Number of text columns. Defaults to 1 if no <c>w:cols</c> is set.</summary>
+    required public int Columns { get; init; }
+
+    /// <summary>URIs of the header parts referenced by this section, in declaration order.</summary>
+    required public IReadOnlyList<string> HeaderPartUris { get; init; }
+
+    /// <summary>URIs of the footer parts referenced by this section, in declaration order.</summary>
+    required public IReadOnlyList<string> FooterPartUris { get; init; }
+}
+
+/// <summary>
 /// Snapshot of the high-signal "is this template fillable yet?" state for a
 /// <see cref="DocxSession"/>. Returned by <see cref="DocxSession.GetEditSummary"/>.
 /// Composes existing primitives — <see cref="DocxSession.FindPlaceholders"/>,
