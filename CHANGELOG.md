@@ -7,6 +7,13 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 - **Percentage table/cell widths no longer crash `WmlToHtmlConverter`** (issue #210). `convertDocxToHtml` threw `FormatException` ("Format_InvalidStringWithValue, 100%") whenever a table-level (`w:tblW`) or cell-level (`w:tcW`) width used `w:type="pct"` with a percent-suffixed value such as `w:w="100%"` / `w:w="50%"`. This is the form the `docx` npm library emits for `WidthType.PERCENTAGE`, and it is valid per the OOXML `ST_TblWidth` / `ST_MeasurementOrPercent` schema (which permits either a plain integer in fiftieths-of-a-percent **or** a `"<number>%"` string). The converter cast the attribute straight to `int`, which throws on `"100%"`; DXA (twips) widths were unaffected because they are always plain integers. Width parsing for `w:tblW`/`w:tcW` now goes through a single `ParseTblWidthValue` helper that tolerates the percent-suffixed form: an explicit `"100%"` is treated as a literal percentage, while a bare integer under `pct` is still interpreted as fiftieths of a percent (`5000` → `100%`). Non-numeric/garbage widths are ignored gracefully instead of throwing. Tests: `HcTablePercentageWidthTests` in `Docxodus.Tests/HtmlConverterTablePercentageWidthTests.cs`.
 
+### Added
+- **Python DOCX→HTML conversion** — `convert_docx_to_html(data, options)` and
+  `DocxSession.to_html(options)` in `docx_scalpel`, backed by a new shared
+  `HtmlConversionOps` core renderer that the WASM bridge now also delegates to.
+  New `HtmlOptions` dataclass mirrors the existing WASM/npm conversion options.
+  New stdio-host ops: `convert_to_html`, `session_to_html`.
+
 ## [6.2.0] - 2026-05-28
 
 ### Added
