@@ -121,6 +121,123 @@ public static class DocxDiff
         var script = IrEditScriptBuilder.Build(irLeft, irRight, diff);
         return IrEditScriptJson.Write(script);
     }
+
+    /// <summary>
+    /// Consolidate the edits of N reviewers — each an independently revised copy of the SAME
+    /// <paramref name="baseDocument"/> — into a single tracked-changes <see cref="WmlDocument"/> carrying
+    /// native Word revision markup (<c>w:ins</c>/<c>w:del</c>/<c>w:moveFrom</c>/<c>w:moveTo</c>/<c>w:rPrChange</c>),
+    /// with each reviewer's contribution attributed to that reviewer's own author name. This is the N-way,
+    /// shared-base composition counterpart to the pairwise <see cref="Compare"/>: every reviewer is diffed
+    /// against the common base and the resulting per-reviewer edit scripts are merged at the block- and
+    /// token-span level into one document.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Shared-base contract.</b> All reviewers MUST be derived from the same
+    /// <paramref name="baseDocument"/>; the merge is anchored on the base's deterministic block anchors, and a
+    /// reviewer document with no common ancestry will simply read as a wholesale rewrite. Reviewers are
+    /// processed in list order, which is significant for tie-breaking under
+    /// <see cref="ConflictResolution.FirstReviewerWins"/> and for the emission order under
+    /// <see cref="ConflictResolution.StackAll"/>.</para>
+    ///
+    /// <para><b>Multi-author attribution.</b> Each reviewer's revisions are stamped with that reviewer's
+    /// <see cref="DocxDiffReviewer.Author"/> (not the single
+    /// <see cref="DocxDiffSettings.AuthorForRevisions"/>), so the consolidated document distinguishes who made
+    /// each edit — directly consumable by Word's reviewing pane and by consolidate-forward pipelines.</para>
+    ///
+    /// <para><b>Round-trip contract.</b> The result satisfies the WmlComparer round-trip relative to the
+    /// policy-resolved outcome: <c>RevisionProcessor.RejectRevisions(result)</c> content-equals
+    /// <paramref name="baseDocument"/> (rejecting every reviewer's edits restores the base) and
+    /// <c>RevisionAccepter.AcceptRevisions(result)</c> content-equals the document the chosen
+    /// <see cref="DocxDiffConsolidateSettings.ConflictResolution"/> policy resolves to (e.g. base text retained
+    /// at conflicted spans under <see cref="ConflictResolution.BaseWins"/>, the first reviewer's text under
+    /// <see cref="ConflictResolution.FirstReviewerWins"/>).</para>
+    ///
+    /// <para><b>Conflicts.</b> A base span edited DIFFERENTLY by two or more reviewers is a conflict: it is
+    /// resolved per the configured policy in the OUTPUT, and every competing edit is recorded — call
+    /// <see cref="GetConflicts"/> on the same inputs/settings to retrieve the conflict list (id, base anchor,
+    /// token span, applied policy, and the competing edits per reviewer).</para>
+    ///
+    /// <para><b>Determinism &amp; thread-safety.</b> With
+    /// <see cref="DocxDiffConsolidateSettings.Diff"/>'s <see cref="DocxDiffSettings.Deterministic"/> true (the
+    /// default), the consolidated output is byte-identical across runs of the same inputs. The method is a pure
+    /// function of its arguments with no shared mutable state; concurrent calls on distinct inputs are safe.</para>
+    ///
+    /// <para><b>Zero reviewers.</b> An empty <paramref name="reviewers"/> list returns
+    /// <paramref name="baseDocument"/> unchanged (no edits to consolidate).</para>
+    /// </remarks>
+    /// <param name="baseDocument">The shared base document every reviewer revised.</param>
+    /// <param name="reviewers">The reviewers' revised copies and their author names, in priority order.</param>
+    /// <param name="settings">Consolidate settings (diff settings + conflict policy); <c>null</c> uses the defaults.</param>
+    /// <returns>
+    /// A new <see cref="WmlDocument"/> with multi-author tracked-changes markup; the inputs are unchanged.
+    /// When <paramref name="reviewers"/> is empty, <paramref name="baseDocument"/> is returned as-is.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="baseDocument"/> or <paramref name="reviewers"/> is null.</exception>
+    public static WmlDocument Consolidate(
+        WmlDocument baseDocument, IReadOnlyList<DocxDiffReviewer> reviewers,
+        DocxDiffConsolidateSettings? settings = null)
+    {
+        ArgumentNullException.ThrowIfNull(baseDocument);
+        ArgumentNullException.ThrowIfNull(reviewers);
+        var s = settings ?? new DocxDiffConsolidateSettings();
+        var diff = s.Diff.ToIrDiffSettings();
+        if (reviewers.Count == 0) return baseDocument;
+        var baseIr = IrReader.Read(baseDocument, ReadOpts);
+        var revIr = reviewers.Select(r => (r.Author, IrReader.Read(r.Document, ReadOpts))).ToList();
+        var script = IrCompositeMerger.Merge(baseIr, revIr, s.ConflictResolution, diff);
+        return IrCompositeMarkupRenderer.Render(
+            script, baseDocument, reviewers.Select(r => (r.Author, r.Document)).ToList(), diff);
+    }
+
+    /// <summary>
+    /// Return the conflicts that an N-way <see cref="Consolidate"/> of the same inputs would record — each a
+    /// base span edited DIFFERENTLY by two or more reviewers — WITHOUT producing the consolidated document.
+    /// This is the inspect-before-merge view: it runs the same shared-base merge as <see cref="Consolidate"/>
+    /// and surfaces only the conflict list, so callers can review disagreements (and choose a
+    /// <see cref="DocxDiffConsolidateSettings.ConflictResolution"/> policy) before committing to an output.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Shared-base contract.</b> As with <see cref="Consolidate"/>, all reviewers MUST derive from the
+    /// same <paramref name="baseDocument"/>, and reviewer LIST ORDER is significant (it determines competitor
+    /// order within each conflict and policy tie-breaking).</para>
+    ///
+    /// <para><b>What a conflict carries.</b> Each <see cref="DocxDiffConflict"/> records the base anchor and
+    /// token span where reviewers disagree, the <see cref="ConflictResolution"/> that WOULD be applied, and the
+    /// per-reviewer competing edits (<see cref="DocxDiffConflict.Competitors"/>, each with the reviewer's
+    /// <see cref="DocxDiffConflictCompetitor.Author"/> and the text that reviewer's edit would produce). A span
+    /// edited by only one reviewer, or identically by several, is NOT a conflict and does not appear here.</para>
+    ///
+    /// <para><b>Consistency with <see cref="Consolidate"/>.</b> Given identical
+    /// <paramref name="baseDocument"/>, <paramref name="reviewers"/>, and <paramref name="settings"/>, the
+    /// conflicts returned here are exactly those recorded by <see cref="Consolidate"/>, with matching
+    /// <see cref="DocxDiffConflict.Id"/> values — so the two calls can be correlated.</para>
+    ///
+    /// <para><b>Determinism &amp; thread-safety.</b> Deterministic for the same inputs and a pure function of
+    /// its arguments with no shared mutable state; concurrent calls on distinct inputs are safe.</para>
+    ///
+    /// <para><b>Zero reviewers.</b> An empty <paramref name="reviewers"/> list yields an empty conflict list.</para>
+    /// </remarks>
+    /// <param name="baseDocument">The shared base document every reviewer revised.</param>
+    /// <param name="reviewers">The reviewers' revised copies and their author names, in priority order.</param>
+    /// <param name="settings">Consolidate settings (diff settings + conflict policy); <c>null</c> uses the defaults.</param>
+    /// <returns>
+    /// The conflicts in document order; empty when there are no conflicting spans (or no reviewers).
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="baseDocument"/> or <paramref name="reviewers"/> is null.</exception>
+    public static IReadOnlyList<DocxDiffConflict> GetConflicts(
+        WmlDocument baseDocument, IReadOnlyList<DocxDiffReviewer> reviewers,
+        DocxDiffConsolidateSettings? settings = null)
+    {
+        ArgumentNullException.ThrowIfNull(baseDocument);
+        ArgumentNullException.ThrowIfNull(reviewers);
+        var s = settings ?? new DocxDiffConsolidateSettings();
+        var diff = s.Diff.ToIrDiffSettings();
+        if (reviewers.Count == 0) return System.Array.Empty<DocxDiffConflict>();
+        var baseIr = IrReader.Read(baseDocument, ReadOpts);
+        var revIr = reviewers.Select(r => (r.Author, IrReader.Read(r.Document, ReadOpts))).ToList();
+        var script = IrCompositeMerger.Merge(baseIr, revIr, s.ConflictResolution, diff);
+        return script.Conflicts.Select(DocxDiffConflict.FromIr).ToList();
+    }
 }
 
 /// <summary>
