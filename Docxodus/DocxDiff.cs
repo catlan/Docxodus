@@ -238,6 +238,105 @@ public static class DocxDiff
         var script = IrCompositeMerger.Merge(baseIr, revIr, s.ConflictResolution, diff);
         return script.Conflicts.Select(DocxDiffConflict.FromIr).ToList();
     }
+
+    /// <summary>
+    /// Consolidate N reviewers' edits of the same <paramref name="baseDocument"/> and return the ATTRIBUTED
+    /// consumer revision list — the consolidate counterpart to <see cref="GetRevisions"/>. Each revision carries
+    /// the contributing reviewer's <see cref="DocxDiffConsolidatedRevision.Author"/> (not a single document
+    /// author) and, when it participates in a conflicted span, the
+    /// <see cref="DocxDiffConsolidatedRevision.ConflictId"/> linking it to the matching
+    /// <see cref="DocxDiffConflict"/> from <see cref="GetConflicts"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Attribution.</b> An insertion is attributed to the reviewer who inserted it; a deletion to the
+    /// reviewer who deleted that base content; a format change to the reviewer who changed the formatting. When a
+    /// single base paragraph was edited by several reviewers, each reviewer's word-level edits are surfaced as
+    /// separate revisions under that reviewer's name (the multi-author generalization of
+    /// <see cref="GetRevisions"/>).</para>
+    ///
+    /// <para><b>Consistency.</b> Given identical <paramref name="baseDocument"/>, <paramref name="reviewers"/>,
+    /// and <paramref name="settings"/>, the revisions returned here describe exactly the edits that
+    /// <see cref="Consolidate"/> places in the consolidated document, and conflict ids match those from
+    /// <see cref="GetConflicts"/>. Deterministic for the same inputs; a pure function of its arguments.</para>
+    ///
+    /// <para><b>Zero reviewers.</b> An empty <paramref name="reviewers"/> list yields an empty revision list.</para>
+    /// </remarks>
+    /// <param name="baseDocument">The shared base document every reviewer revised.</param>
+    /// <param name="reviewers">The reviewers' revised copies and their author names, in priority order.</param>
+    /// <param name="settings">Consolidate settings (diff settings + conflict policy); <c>null</c> uses the defaults.</param>
+    /// <returns>The attributed revisions in document order; empty when there are no reviewers.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="baseDocument"/> or <paramref name="reviewers"/> is null.</exception>
+    public static IReadOnlyList<DocxDiffConsolidatedRevision> GetConsolidatedRevisions(
+        WmlDocument baseDocument, IReadOnlyList<DocxDiffReviewer> reviewers,
+        DocxDiffConsolidateSettings? settings = null)
+    {
+        ArgumentNullException.ThrowIfNull(baseDocument);
+        ArgumentNullException.ThrowIfNull(reviewers);
+        var s = settings ?? new DocxDiffConsolidateSettings();
+        var diff = s.Diff.ToIrDiffSettings();
+        if (reviewers.Count == 0) return System.Array.Empty<DocxDiffConsolidatedRevision>();
+        var baseIr = IrReader.Read(baseDocument, ReadOpts);
+        var revIr = reviewers.Select(r => (r.Author, IrReader.Read(r.Document, ReadOpts))).ToList();
+        var script = IrCompositeMerger.Merge(baseIr, revIr, s.ConflictResolution, diff);
+        var rendered = IrCompositeRevisionRenderer.Render(script, baseIr, revIr, diff);
+        return rendered.Select(x => new DocxDiffConsolidatedRevision(
+            type: x.Rev.Type switch
+            {
+                IrRevisionType.Inserted => DocxDiffRevisionType.Inserted,
+                IrRevisionType.Deleted => DocxDiffRevisionType.Deleted,
+                IrRevisionType.Moved => DocxDiffRevisionType.Moved,
+                IrRevisionType.FormatChanged => DocxDiffRevisionType.FormatChanged,
+                _ => throw new ArgumentOutOfRangeException(nameof(reviewers), x.Rev.Type, "Unknown IrRevisionType."),
+            },
+            text: x.Rev.Text,
+            author: x.Author,
+            date: x.Rev.Date,
+            moveGroupId: x.Rev.MoveGroupId,
+            isMoveSource: x.Rev.IsMoveSource,
+            formatChange: x.Rev.FormatChange is { } fc ? new DocxDiffFormatChange(fc) : null,
+            leftAnchor: x.Rev.LeftAnchor,
+            rightAnchor: x.Rev.RightAnchor,
+            conflictId: x.ConflictId)).ToList();
+    }
+
+    /// <summary>
+    /// Consolidate N reviewers' edits of the same <paramref name="baseDocument"/> and return the COMPOSITE edit
+    /// script as a JSON string — the consolidate counterpart to <see cref="GetEditScriptJson"/>. It additively
+    /// extends the two-way edit-script JSON: every operation carries an <c>author</c> and <c>sourceReviewer</c>,
+    /// a <c>conflictId</c> when the op is a conflict winner, and (for a composed multi-reviewer paragraph)
+    /// <c>authoredTokens</c> + <c>sourceRightAnchors</c>; the document additionally carries a top-level
+    /// <c>conflicts</c> array (id, base anchor, token span, applied policy, and the per-reviewer competing edits).
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Diff-as-data.</b> This is the machine-readable, transport-friendly form of a consolidate:
+    /// suitable for storage, audit, review tooling, and non-.NET consumers. It is stable and deterministic for
+    /// the same inputs.</para>
+    ///
+    /// <para><b>Zero reviewers.</b> An empty <paramref name="reviewers"/> list yields a JSON document with empty
+    /// <c>operations</c> and <c>conflicts</c> arrays.</para>
+    /// </remarks>
+    /// <param name="baseDocument">The shared base document every reviewer revised.</param>
+    /// <param name="reviewers">The reviewers' revised copies and their author names, in priority order.</param>
+    /// <param name="settings">Consolidate settings (diff settings + conflict policy); <c>null</c> uses the defaults.</param>
+    /// <returns>The composite edit script serialized as indented JSON.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="baseDocument"/> or <paramref name="reviewers"/> is null.</exception>
+    public static string GetConsolidatedEditScriptJson(
+        WmlDocument baseDocument, IReadOnlyList<DocxDiffReviewer> reviewers,
+        DocxDiffConsolidateSettings? settings = null)
+    {
+        ArgumentNullException.ThrowIfNull(baseDocument);
+        ArgumentNullException.ThrowIfNull(reviewers);
+        var s = settings ?? new DocxDiffConsolidateSettings();
+        var diff = s.Diff.ToIrDiffSettings();
+        if (reviewers.Count == 0)
+            return IrCompositeScriptJson.Write(new IrCompositeScript(
+                IrNodeList.From(System.Array.Empty<IrCompositeOp>()),
+                IrNodeList.From(System.Array.Empty<IrConflict>())));
+        var baseIr = IrReader.Read(baseDocument, ReadOpts);
+        var revIr = reviewers.Select(r => (r.Author, IrReader.Read(r.Document, ReadOpts))).ToList();
+        var script = IrCompositeMerger.Merge(baseIr, revIr, s.ConflictResolution, diff);
+        return IrCompositeScriptJson.Write(script);
+    }
 }
 
 /// <summary>
