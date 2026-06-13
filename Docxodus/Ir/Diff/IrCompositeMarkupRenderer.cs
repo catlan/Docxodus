@@ -149,9 +149,14 @@ internal static class IrCompositeMarkupRenderer
         IrMarkupRenderer.RenderState state,
         List<XElement> sink)
     {
-        // Composed multi-reviewer paragraph rendering is Task 2.3.
+        // Composed multi-reviewer paragraph: per-span authorship from AuthoredTokens, each contributing
+        // reviewer's right paragraph resolved via SourceRightAnchors. Delegates to the two-way renderer's
+        // composed-paragraph builder so it can reuse the private token-span emit helpers (Task 2.3).
         if (compositeOp.AuthoredTokens != null)
-            throw new NotImplementedException("composed paragraph rendering: Task 2.3");
+        {
+            IrMarkupRenderer.RenderComposedParagraph(compositeOp, baseIr, reviewerIrs, state, sink);
+            return;
+        }
 
         var op = compositeOp.Op;
         int sourceReviewer = compositeOp.SourceReviewer;

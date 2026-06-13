@@ -485,10 +485,18 @@ internal static class IrCompositeMerger
             conflicts.AddRange(blockConflicts);
             var merged = new IrTokenDiff(IrNodeList.From(authored.Select(a => a.Op)));
             var structOp = touched[0].Op with { TokenDiff = merged };
+            // Each contributing reviewer's INSERT authored-token spans index THAT reviewer's right-token
+            // list, so the renderer needs each reviewer's OWN right paragraph anchor (the merged structOp
+            // only retains touched[0]'s). Carry them additively per contributing reviewer with a right anchor.
+            var sourceRightAnchors = touched
+                .Where(e => e.Op.RightAnchor != null)
+                .Select(e => new IrSourceRightAnchor(e.Reviewer, e.Op.RightAnchor!))
+                .ToList();
             // Only the first conflict id is linked on the op; consumers needing all conflict ids
             // on this op must scan IrCompositeScript.Conflicts independently (by design).
             ops.Add(new IrCompositeOp(structOp, "", touched[0].Reviewer, IrNodeList.From(authored),
-                blockConflicts.Count > 0 ? blockConflicts[0].Id : (int?)null));
+                blockConflicts.Count > 0 ? blockConflicts[0].Id : (int?)null,
+                IrNodeList.From(sourceRightAnchors)));
             return;
         }
         // BLOCK-LEVEL CONFLICT

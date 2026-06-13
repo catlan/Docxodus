@@ -12,6 +12,16 @@ namespace Docxodus.Ir.Diff;
 internal sealed record IrAuthoredTokenOp(IrTokenOp Op, string Author, int SourceReviewer);
 
 /// <summary>
+/// Maps one contributing reviewer (<see cref="Reviewer"/>, indexing the caller's reviewers list) to the
+/// <c>kind:scope:unid</c> RIGHT anchor of that reviewer's edited paragraph for a composed
+/// <see cref="IrCompositeOp"/>. The composite renderer needs each contributing reviewer's OWN right
+/// paragraph to source inserted runs: an <see cref="IrAuthoredTokenOp"/>'s Insert RightStart/RightEnd
+/// index THAT reviewer's right-token list. <see cref="IrCompositeOp.SourceRightAnchors"/> carries one
+/// entry per contributing reviewer so the renderer can resolve each right paragraph independently.
+/// </summary>
+internal sealed record IrSourceRightAnchor(int Reviewer, string Anchor);
+
+/// <summary>
 /// An edit op tagged with its contributing reviewer. For a composed multi-reviewer Modify,
 /// <see cref="Op"/>'s <c>TokenDiff</c> is the MERGED diff (apply/json truth) and
 /// <see cref="AuthoredTokens"/> carries per-span authorship for the renderer; for all
@@ -19,13 +29,20 @@ internal sealed record IrAuthoredTokenOp(IrTokenOp Op, string Author, int Source
 /// apply. <see cref="SourceReviewer"/> -1 = base-sourced.
 /// <para><see cref="ConflictId"/> is non-null when the op is the winner-representative of a conflict
 /// (the losing competitors are recorded in <see cref="IrCompositeScript.Conflicts"/>).</para>
+/// <para><see cref="SourceRightAnchors"/> is non-null ONLY on a composed multi-reviewer Modify (alongside
+/// <see cref="AuthoredTokens"/>): it carries, per contributing reviewer, the right paragraph anchor the
+/// renderer must resolve to source that reviewer's inserted runs (their <see cref="IrAuthoredTokenOp"/>
+/// Insert spans index that reviewer's right-token list). For all single-source ops it is null and
+/// <see cref="Op"/>'s own <c>RightAnchor</c> suffices. Additive/optional — absent from older scripts and
+/// from the JSON wire shape, so existing tests/serialization are unaffected.</para>
 /// </summary>
 internal sealed record IrCompositeOp(
     IrEditOp Op,
     string Author,
     int SourceReviewer,
     IrNodeList<IrAuthoredTokenOp>? AuthoredTokens = null,
-    int? ConflictId = null);
+    int? ConflictId = null,
+    IrNodeList<IrSourceRightAnchor>? SourceRightAnchors = null);
 
 /// <summary>
 /// One reviewer's competing result for a conflicted span. <see cref="Author"/> is the reviewer

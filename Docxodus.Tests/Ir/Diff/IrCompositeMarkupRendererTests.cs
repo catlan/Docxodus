@@ -76,4 +76,75 @@ public class IrCompositeMarkupRendererTests
         Assert.Contains("alpha one EDITED", Docs.PlainText(RevisionAccepter.AcceptRevisions(merged)));
         Assert.Contains("w:author=\"Bob\"", Docs.MainPartXml(merged));
     }
+
+    // ---- Task 2.3: composed multi-author single-paragraph rendering ----
+
+    [Fact]
+    public void Two_reviewers_editing_different_words_of_one_paragraph_compose_inline()
+    {
+        var baseDoc = Docs.Para("the quick brown fox jumps");
+        var r1 = Docs.Para("the SLOW brown fox jumps");     // edits word 2
+        var r2 = Docs.Para("the quick brown fox LEAPS");    // edits word 5
+        var script = IrCompositeMergerTests.MergeOf(baseDoc, ("Bob", r1), ("Fred", r2));
+        var merged = IrCompositeMarkupRenderer.Render(script, baseDoc,
+            new[] { ("Bob", r1), ("Fred", r2) }, new DocxDiffSettings().ToIrDiffSettings());
+
+        Assert.Equal("the quick brown fox jumps", Docs.PlainText(RevisionProcessor.RejectRevisions(merged)));
+        var accepted = Docs.PlainText(RevisionAccepter.AcceptRevisions(merged));
+        Assert.Contains("SLOW", accepted);
+        Assert.Contains("LEAPS", accepted);
+        Assert.DoesNotContain("quick", accepted);
+        Assert.DoesNotContain("jumps", accepted);
+        var xml = Docs.MainPartXml(merged);
+        Assert.Contains("w:author=\"Bob\"", xml);
+        Assert.Contains("w:author=\"Fred\"", xml);
+    }
+
+    [Fact]
+    public void Three_reviewers_editing_different_words_of_one_paragraph_compose_inline()
+    {
+        var baseDoc = Docs.Para("the quick brown fox jumps over");
+        var r1 = Docs.Para("the SLOW brown fox jumps over");     // word 2
+        var r2 = Docs.Para("the quick GREEN fox jumps over");    // word 3
+        var r3 = Docs.Para("the quick brown fox LEAPS over");    // word 5
+        var script = IrCompositeMergerTests.MergeOf(baseDoc, ("Bob", r1), ("Fred", r2), ("Gus", r3));
+        var merged = IrCompositeMarkupRenderer.Render(script, baseDoc,
+            new[] { ("Bob", r1), ("Fred", r2), ("Gus", r3) }, new DocxDiffSettings().ToIrDiffSettings());
+
+        Assert.Equal("the quick brown fox jumps over", Docs.PlainText(RevisionProcessor.RejectRevisions(merged)));
+        var accepted = Docs.PlainText(RevisionAccepter.AcceptRevisions(merged));
+        Assert.Contains("SLOW", accepted);
+        Assert.Contains("GREEN", accepted);
+        Assert.Contains("LEAPS", accepted);
+        Assert.DoesNotContain("quick", accepted);
+        Assert.DoesNotContain("brown", accepted);
+        Assert.DoesNotContain("jumps", accepted);
+        var xml = Docs.MainPartXml(merged);
+        Assert.Contains("w:author=\"Bob\"", xml);
+        Assert.Contains("w:author=\"Fred\"", xml);
+        Assert.Contains("w:author=\"Gus\"", xml);
+    }
+
+    [Fact]
+    public void One_reviewer_edits_two_words_other_edits_one_word_compose_inline()
+    {
+        var baseDoc = Docs.Para("the quick brown fox jumps over");
+        var r1 = Docs.Para("the SLOW brown fox LANDS over");     // Bob edits words 2 and 5
+        var r2 = Docs.Para("the quick GREEN fox jumps over");    // Fred edits word 3
+        var script = IrCompositeMergerTests.MergeOf(baseDoc, ("Bob", r1), ("Fred", r2));
+        var merged = IrCompositeMarkupRenderer.Render(script, baseDoc,
+            new[] { ("Bob", r1), ("Fred", r2) }, new DocxDiffSettings().ToIrDiffSettings());
+
+        Assert.Equal("the quick brown fox jumps over", Docs.PlainText(RevisionProcessor.RejectRevisions(merged)));
+        var accepted = Docs.PlainText(RevisionAccepter.AcceptRevisions(merged));
+        Assert.Contains("SLOW", accepted);
+        Assert.Contains("LANDS", accepted);
+        Assert.Contains("GREEN", accepted);
+        Assert.DoesNotContain("quick", accepted);
+        Assert.DoesNotContain("brown", accepted);
+        Assert.DoesNotContain("jumps", accepted);
+        var xml = Docs.MainPartXml(merged);
+        Assert.Contains("w:author=\"Bob\"", xml);
+        Assert.Contains("w:author=\"Fred\"", xml);
+    }
 }

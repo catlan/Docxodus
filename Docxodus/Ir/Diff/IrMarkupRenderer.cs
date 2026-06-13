@@ -1300,6 +1300,125 @@ internal static class IrMarkupRenderer
         sink.Add(newPara);
     }
 
+    // ------------------------------------------------------- composite (multi-author) modify path
+
+    /// <summary>
+    /// Render ONE base paragraph edited by 2+ reviewers into a single <c>w:p</c> whose run-level content
+    /// composes per-span authorship: consecutive <see cref="IrAuthoredTokenOp"/>s sharing
+    /// <c>(Author, SourceReviewer)</c> are grouped, and each group is emitted via the shared
+    /// <see cref="BuildTokenOpContent"/> with the contributing reviewer's right paragraph as the right source
+    /// (so Insert spans, whose RightStart/RightEnd index THAT reviewer's right-token list, resolve correctly)
+    /// and <see cref="RenderState.AuthorOverride"/> set to that reviewer. Base-sourced groups
+    /// (<c>SourceReviewer == -1</c>, Equal spans) read the BASE paragraph for both sides with no author
+    /// override. The cloned <c>pPr</c> is the BASE paragraph's (the paragraph exists on every side and the
+    /// composed edits are text-only, so the base pPr is the deterministic accepted-state shape).
+    /// <para><paramref name="op"/> carries the MERGED token diff in <c>op.Op.TokenDiff</c> (the apply/json
+    /// truth, used by the single-reviewer path) and the per-span authorship in <c>op.AuthoredTokens</c>;
+    /// <c>op.SourceRightAnchors</c> maps each contributing reviewer to its right paragraph anchor. The
+    /// invariant is the multi-author generalization of the two-way contract: reject-all restores the base
+    /// paragraph text; accept-all yields every reviewer's accepted word edits.</para>
+    /// </summary>
+    internal static void RenderComposedParagraph(
+        IrCompositeOp op,
+        IrDocument baseIr,
+        IReadOnlyList<IrDocument> reviewerIrs,
+        RenderState state,
+        List<XElement> sink)
+    {
+        var authored = op.AuthoredTokens
+            ?? throw new DocxodusException("RenderComposedParagraph requires op.AuthoredTokens.");
+        string? baseAnchor = op.Op.LeftAnchor;
+        var basePara = SourceElement(baseAnchor, baseIr);
+        if (basePara == null)
+        {
+            // Defensive: a composed op should always resolve its base paragraph. Fall back to the merged
+            // diff via the single-reviewer path so the op is not silently dropped.
+            RenderModifiedParagraph(op.Op, op.Op.TokenDiff!, state, sink);
+            return;
+        }
+
+        // Base left tokens + run model, built once (every group's Equal/Delete spans read these).
+        var leftTokens = ParagraphTokens(baseAnchor, baseIr, state.Settings);
+        var leftRuns = new SourceRunModel(basePara);
+
+        // Per-reviewer right paragraph: tokens + run model, resolved from op.SourceRightAnchors (each
+        // contributing reviewer's OWN right paragraph for this base block) and cached so a reviewer with
+        // several disjoint word edits builds its model once.
+        var rightAnchorByReviewer = new Dictionary<int, string>();
+        if (op.SourceRightAnchors != null)
+            foreach (var sra in op.SourceRightAnchors)
+                rightAnchorByReviewer[sra.Reviewer] = sra.Anchor;
+        var rightTokensCache = new Dictionary<int, IReadOnlyList<IrDiffToken>>();
+        var rightRunsCache = new Dictionary<int, SourceRunModel>();
+
+        // Clone the BASE pPr (deterministic; composed edits are text-only).
+        var newPara = new XElement(W.p);
+        var basePPr = basePara.Element(W.pPr);
+        if (basePPr != null)
+            newPara.Add(StripUnids(new XElement(basePPr)));
+
+        // Save/restore the shared state's per-op fields so the renderer's outer loop is unaffected.
+        var savedAuthor = state.AuthorOverride;
+        var savedRightSource = state.RightSource;
+        var savedRightSourceId = state.RightSourceId;
+
+        int i = 0;
+        var count = authored.Count;
+        while (i < count)
+        {
+            // Coalesce the maximal run of consecutive authored ops sharing (Author, SourceReviewer).
+            int reviewer = authored[i].SourceReviewer;
+            string author = authored[i].Author;
+            int groupStart = i;
+            while (i < count &&
+                   authored[i].SourceReviewer == reviewer &&
+                   string.Equals(authored[i].Author, author, StringComparison.Ordinal))
+                i++;
+
+            var groupOps = new IrTokenOp[i - groupStart];
+            for (int k = 0; k < groupOps.Length; k++)
+                groupOps[k] = authored[groupStart + k].Op;
+            var subDiff = new IrTokenDiff(IrNodeList.From(groupOps));
+
+            if (reviewer < 0)
+            {
+                // Base-sourced group (Equal spans): both sides read the base paragraph; no author override.
+                state.AuthorOverride = null;
+                state.RightSource = baseIr;
+                state.RightSourceId = -1;
+                newPara.Add(BuildTokenOpContent(subDiff, leftTokens, leftTokens, leftRuns, leftRuns, state));
+            }
+            else
+            {
+                // Reviewer-sourced group: point the right side at THAT reviewer's right paragraph so Insert
+                // spans (indexing the reviewer's right-token list) resolve to its runs; Delete spans still
+                // read the base (left) model. Author override attributes every emitted revision.
+                state.AuthorOverride = author;
+                state.RightSource = reviewerIrs[reviewer];
+                state.RightSourceId = reviewer;
+
+                if (!rightTokensCache.TryGetValue(reviewer, out var rightTokens))
+                {
+                    string? ra = rightAnchorByReviewer.TryGetValue(reviewer, out var a) ? a : null;
+                    rightTokens = ParagraphTokens(ra, reviewerIrs[reviewer], state.Settings);
+                    rightTokensCache[reviewer] = rightTokens;
+                    var rightPara = SourceElement(ra, reviewerIrs[reviewer]);
+                    rightRunsCache[reviewer] = rightPara != null
+                        ? new SourceRunModel(rightPara)
+                        : new SourceRunModel(new XElement(W.p));
+                }
+                var rightRuns = rightRunsCache[reviewer];
+                newPara.Add(BuildTokenOpContent(subDiff, leftTokens, rightTokens, leftRuns, rightRuns, state));
+            }
+        }
+
+        state.AuthorOverride = savedAuthor;
+        state.RightSource = savedRightSource;
+        state.RightSourceId = savedRightSourceId;
+
+        sink.Add(newPara);
+    }
+
     // ----------------------------------------------------------------- fine modify path
 
     /// <summary>
