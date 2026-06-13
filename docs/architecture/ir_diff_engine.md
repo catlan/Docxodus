@@ -93,6 +93,74 @@ A `ModifyBlock` over a paragraph carries a `tokenDiff`; over a table, a `tableDi
 1. **Deterministic dates.** `WmlComparerSettings.DateTimeForRevisions` defaults to `DateTime.Now` — the same compare twice yields different dates. `DocxDiff` pins a fixed epoch by default so output is reproducible. Opt into wall-clock via `Deterministic = false`.
 2. **`FormatComparison = ModeledOnly`.** A `w:rPrChange`-grade report can only DESCRIBE modeled fields, so a format change driven by an undescribable unmodeled-only rPr flip (`w:lang`, `w:bCs`, complex-script toggles) is noise. `ModeledOnly` collapses that noise; the trade-off is a false negative on a visible-but-unmodeled change (e.g. `w:shd` run shading). `Full` restores byte-fidelity comparison.
 
+## N-way composite / Consolidate
+
+The IR engine merges **N reviewers' edits** — each an independently revised copy of ONE shared base — into a single tracked-changes document, an attributed revision list, a composite edit-script-as-data, and a structured conflict report. This is the IR-native answer to the last `WmlComparer` capability the engine had not addressed: `WmlComparer.Consolidate` (the 84 `CONSOLIDATE` cases in the M2.3 parity inventory, deferred there as "out of v1 scope").
+
+### Public surface
+
+Four entry points on `public static class DocxDiff` (`Docxodus/DocxDiff.cs`), with the supporting types in `Docxodus/DocxDiffConsolidate.cs`:
+
+| Method | Returns | Purpose |
+|---|---|---|
+| `Consolidate(base, reviewers, settings?)` | `WmlDocument` | One multi-author tracked-changes document — each reviewer's edits stamped with that reviewer's own author name (`w:ins`/`w:del`/`w:moveFrom`/`w:moveTo`/`w:rPrChange`). The N-way, shared-base counterpart to `Compare`. |
+| `GetConsolidatedRevisions(base, reviewers, settings?)` | `IReadOnlyList<DocxDiffConsolidatedRevision>` | The attributed revision list — `DocxDiffRevision`'s shape plus the contributing reviewer's `Author` and, on a conflict winner, a `ConflictId`. |
+| `GetConsolidatedEditScriptJson(base, reviewers, settings?)` | `string` | The composite edit script as data: every op additively carries `author`/`sourceReviewer`, a `conflictId` when it won a conflict, and (for a composed paragraph) `authoredTokens` + `sourceRightAnchors`; the document gains a top-level `conflicts` array. |
+| `GetConflicts(base, reviewers, settings?)` | `IReadOnlyList<DocxDiffConflict>` | The inspect-before-merge view — the same merge run, surfacing only the conflict list so a caller can review disagreements (and pick a policy) before committing to an output. |
+
+Supporting public types (all `#nullable enable`, XML-doc'd, no static state — author flows per reviewer): `DocxDiffReviewer { Document, Author }`, `DocxDiffConsolidateSettings { Diff, ConflictResolution }` (composes — does not inherit — the `sealed DocxDiffSettings` via `Diff`), `enum ConflictResolution { BaseWins, FirstReviewerWins, StackAll }`, `DocxDiffConsolidatedRevision` (= `DocxDiffRevision` + `ConflictId`), `DocxDiffConflict { Id, BaseAnchor, TokenStart, TokenEnd, AppliedPolicy, Competitors }`, `DocxDiffConflictCompetitor { Author, ResultText }`. N reviewers, no cap; reviewer LIST ORDER is significant (it determines competitor order and policy tie-breaking). Zero reviewers returns the base unchanged / empty lists. The four surfaces are exposed through every shipping layer — WASM (`DocxDiffBridge.Consolidate`/`GetConflictsJson`/`GetConsolidatedRevisionsJson`/`GetConsolidatedEditScriptJson`), npm (`docxDiffConsolidate`/`docxDiffGetConflicts`/`docxDiffGetConsolidatedRevisions`/`docxDiffGetConsolidatedEditScript`), docx-scalpel (`docx_diff_consolidate`/`docx_diff_get_conflicts`/`docx_diff_get_consolidated_revisions`/`docx_diff_get_consolidated_edit_script`) — all routing through `DocxDiffOps`, so the wire shapes live in one place.
+
+### The merge algorithm
+
+The source of truth is `IrCompositeMerger.Merge` (`Docxodus/Ir/Diff/IrCompositeMerger.cs`). The merge builds **N pairwise edit scripts** — `IrEditScriptBuilder.Build(baseIr, reviewer_i)` — which all share the base's anchor space AND, within a paired block, the same base token coordinate system. That shared coordinate system is what makes the merge exact rather than heuristic. It then walks the base document in block order; per base block:
+
+- **Untouched** (no reviewer op, or all `EqualBlock`) → one base-sourced passthrough.
+- **One reviewer touched it** → that reviewer's op verbatim, authored to that reviewer.
+- **≥2 reviewers, all producing the SAME right result** → consensus: a single op, authored to the first reviewer. A set of consensus deletes collapses to one delete.
+- **≥2 reviewers, all paragraph `ModifyBlock` token edits with UNCHANGED paragraph properties** → **token-span composition** (`ComposeTokenSpans`): the per-reviewer token diffs, all expressed over the same base token stream `[0, baseTokenCount)`, compose into one merged authored token-op list. Non-overlapping span edits each land inline under their own author; overlapping spans become a conflict resolved by the policy. The emitted spans tile the base token stream exactly once (a `Debug.Assert` totality invariant).
+- **Anything else** (delete-vs-modify; a reviewer who changed both the paragraph's text AND its `w:pPr`; mixed kinds) → a **block-level conflict** resolved by the policy. (The pPr gate is deliberate: the compose path clones the BASE paragraph's pPr, so a reviewer who also changed pPr would have that change silently dropped — routing such an op to the conflict path preserves and surfaces the reviewer's full edit instead.)
+
+**Block-level inserts never conflict.** Every reviewer's right-only inserted block appears, slotted immediately after the shared base anchor it follows, ordered by reviewer index — two reviewers both inserting after the same paragraph both appear, attributed.
+
+### Conflict model + the three policies
+
+A conflict is a base span (a token span, or a whole block) edited DIFFERENTLY by two or more reviewers. The configured `ConflictResolution` decides what lands in the OUTPUT document; the conflict is **always recorded in the data regardless of policy** (`GetConflicts` / the `conflicts` JSON array / a `ConflictId` on the winning revision):
+
+| Policy | Output at the conflicted span |
+|---|---|
+| `BaseWins` (default) | The base text is kept; every competitor is recorded. |
+| `FirstReviewerWins` | The first reviewer (list order) is applied inline; the others are recorded. |
+| `StackAll` | Each competing edit is emitted in reviewer order; all are recorded. |
+
+A `DocxDiffConflict` carries `BaseAnchor` + the base **token span** `[TokenStart, TokenEnd)` (an empty interval = a block-level conflict), the `AppliedPolicy`, and the per-reviewer `Competitors` (each with `Author` and the `ResultText` that reviewer's edit would have produced — `""` for a deletion). Its `Id` matches the `ConflictId` on the winning `DocxDiffConsolidatedRevision`, so conflicts correlate to the revision actually placed in the document.
+
+### Multi-author rendering + round-trip
+
+The same renderer backs `Compare` and `Consolidate`: `IrMarkupRenderer` was extended with a per-op author override + per-reviewer source selection (each reviewer's composed INSERT token spans index THAT reviewer's right-token list, so the renderer carries each contributing reviewer's own right paragraph anchor). Single-document `Compare` output is **byte-unchanged** by this extension. The round-trip invariant generalizes `Compare`'s accept ≡ right / reject ≡ left: `RejectRevisions(Consolidate(...))` content-equals the **base** (rejecting every reviewer restores the base), and `AcceptRevisions(...)` content-equals the **policy-resolved composite** (e.g. base text at conflicted spans under `BaseWins`, the first reviewer's text under `FirstReviewerWins`).
+
+### Before / after intuition
+
+- **Two reviewers editing DIFFERENT sentences of one paragraph.** Base: *"The cat sat. The dog ran."* Alice edits the first sentence, Bob the second. Their two token diffs share the base token stream, so token-span composition fuses them into **ONE merged paragraph** carrying Alice's edit on sentence 1 and Bob's on sentence 2, each `w:ins`/`w:del` attributed to its own author — directly consumable in Word's reviewing pane. (Legacy `WmlComparer.Consolidate` would instead append two stacked, labeled, colored single-cell boxes after the original — a side-by-side juxtaposition for a human to eyeball, never an inline merge.)
+- **Two reviewers editing the SAME word.** Base: *"the quick fox"*. Alice changes *quick*→*brown*, Bob *quick*→*slow*. The token spans overlap, so this is a recorded conflict at `[BaseAnchor, TokenStart..TokenEnd)`. Under the default `BaseWins`, the output keeps *quick* and `GetConflicts` returns one `DocxDiffConflict` with both competitors (Alice→*brown*, Bob→*slow*); under `FirstReviewerWins` the output reads *brown* (Alice inline) with Bob still recorded; under `StackAll` both edits emit in order. The conflict data is identical across all three policies — only the document body differs.
+
+### Parity outcome — and why the deviation catalog is empty
+
+`ConsolidateParityScoreboardTests` (`Docxodus.Tests/Ir/Diff/ConsolidateParityScoreboardTests.cs`) scores all **84** legacy `WmlComparer.Consolidate` corpus cases (WC001's 10 multi-reviewer rows + WC002's 74 single-reviewer rows): **84/84 reproduce-PASS, 0 deviations, 0 fails**, with the genuine-pass floor ratcheted at 84.
+
+The headline finding the scoreboard records: **legacy `WmlComparer.Consolidate` is a juxtaposition/triage tool, not a merge.** It keeps the original document intact and, for every changed block, APPENDS that reviewer's labeled revised copy (wrapped in a colored single-cell table under the default `ConsolidateWithTable`) right after the original — even for a single reviewer. Its accepted body is therefore, per changed block, `[revisor label][reviewer's block][original block]`: a side-by-side juxtaposition with the revisor name as literal body text. The IR-native engine instead produces a true inline merge. Because the two engines emit categorically different document SHAPES by design, raw accepted-body-text equality is the wrong relation (it never holds — that mismatch IS the supersession). Parity is therefore measured by a **sound-semantics** metric over normalized body plaintext:
+
+- **Single reviewer** → accept ≡ that reviewer's document, **char-exact** (the same accept ≡ right contract `Compare` obeys; holds for all 74 WC002 rows).
+- **Multi-reviewer, no conflict** → every reviewer's ADDED tokens appear in the accepted body (added-token containment, not whole-body subsequence — composition fuses adjacent edited tokens).
+
+The whole-corpus juxtaposition-vs-inline-merge shape divergence is the deliberate supersession, quantified once in the scoreboard footer rather than catalogued as 84 identical per-row entries. A row is catalogued as a per-row **deviation** only when `GetConflicts` reports a TRUE cross-reviewer token-overlap conflict (two reviewers editing the same span differently) — and **no legacy-corpus row produces one** (every corpus edit is single-reviewer or disjoint-span), so the per-row catalog is empty for this corpus. The conflict-supersession path is instead exercised by the unit suites (`DocxDiffOpsConsolidateTests` / `DocxDiffConsolidateApiTests`) and the K-way composite fuzzer (`CompositeFuzzTests`: round-trip reject ≡ base + the `IrCompositeVerifier` apply-verifier over 3/4/5-way seeds).
+
+### v1 limitations (honest)
+
+- **Note scopes are not merged.** The merger does not build composite note-scope (footnote/endnote) ops; `IrCompositeScript.NoteOps` is always null, and a `Debug.Assert` tripwire in `IrCompositeMarkupRenderer` guards against silently dropping note diffs if that changes. A reviewer's footnote/endnote edit is not yet consolidated — a follow-on task.
+- **Cross-reviewer move-vs-edit and split/merge-vs-edit collisions** are handled at BLOCK granularity (a block-level conflict under the policy), not deeply merged.
+- **A reviewer who changed BOTH a paragraph's text AND its paragraph properties (pPr)** routes that block to the conflict path (so the pPr change is preserved/surfaced by the policy, never silently dropped) rather than into token-span composition.
+- **Conflict spans are base TOKEN indices** (`TokenStart`/`TokenEnd`) + `BaseAnchor`, not character offsets — suitable for machine consumers inspecting the edit script.
+
 ## Parity status
 
 The engine was developed against `WmlComparer` as the oracle under a binding method rule: WmlComparer presumed correct per gap; the IR is fixed to match unless an oracle fault is established with concrete evidence. As of M2.6 (this surface):
