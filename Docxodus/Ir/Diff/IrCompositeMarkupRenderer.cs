@@ -104,7 +104,7 @@ internal static class IrCompositeMarkupRenderer
                 // Per-reviewer media import: each reviewer's media-bearing clones live in their own bucket
                 // (keyed by reviewer index); import each from THAT reviewer's package. Opening every reviewer
                 // package only when it actually has clones to import keeps the text-only common case cheap.
-                foreach (var (sourceId, clones) in state.RightSourcedClonesBySource)
+                foreach (var (sourceId, clones) in state.RightSourcedClonesBySource.OrderBy(kvp => kvp.Key))
                 {
                     if (sourceId < 0 || sourceId >= reviewers.Count || clones.Count == 0)
                         continue;   // base-sourced (-1) clones reference base parts already present; nothing to import.

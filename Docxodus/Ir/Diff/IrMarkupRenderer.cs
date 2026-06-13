@@ -1837,11 +1837,11 @@ internal static class IrMarkupRenderer
         public Dictionary<int, List<XElement>> RightSourcedClonesBySource { get; } = new();
 
         /// <summary>The two-way render's single clone bucket (bucket 0 = the right package). Preserves the original
-        /// flat-list API for the two-way <see cref="Render"/> media-import pass; equivalent to the bucket-0 list.</summary>
-        public List<XElement> RightSourcedClones =>
-            RightSourcedClonesBySource.TryGetValue(0, out var list) ? list : EmptyClones;
-
-        private static readonly List<XElement> EmptyClones = new();
+        /// flat-list API for the two-way <see cref="Render"/> media-import pass; equivalent to the bucket-0 list.
+        /// Returns a shared immutable empty sequence when bucket 0 is absent; callers only read (never mutate) the
+        /// returned value, so the shared-immutable pattern is safe and allocation-free.</summary>
+        public IReadOnlyList<XElement> RightSourcedClones =>
+            RightSourcedClonesBySource.TryGetValue(0, out var list) ? list : Array.Empty<XElement>();
 
         /// <summary>Fresh (author, id, date) attribute triple for one revision element; id ascends from 1.</summary>
         public object[] RevisionAttributes() => new object[]
