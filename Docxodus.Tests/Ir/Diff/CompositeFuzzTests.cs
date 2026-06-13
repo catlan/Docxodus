@@ -22,6 +22,26 @@ public class CompositeFuzzTests
     }
 
     [Theory]
+    [InlineData(3)]
+    public void Composite_round_trips_structurally_with_tables_and_footnotes(int reviewerCount)
+    {
+        for (int seed = 0; seed < 50; seed++)
+        {
+            var fc = DiffFuzzer.GenerateCompositeWithStructure(seed, reviewerCount);
+            var baseDoc = new WmlDocument("b.docx", fc.Base);
+            var reviewers = fc.Reviewers
+                .Select(r => new DocxDiffReviewer { Document = new WmlDocument("r.docx", r.Doc), Author = r.Author })
+                .ToList();
+            var merged = DocxDiff.Consolidate(baseDoc, reviewers);
+            var rejected = RevisionProcessor.RejectRevisions(merged);
+            // Structural: rejecting all revisions must restore the base body structure (incl. tables),
+            // not just the body paragraph text. Docs.StructuralBody walks body w:p AND w:tbl (descending
+            // into rows/cells), so a consolidate that corrupts or drops a table on the reject path differs.
+            Assert.Equal(Docs.StructuralBody(baseDoc), Docs.StructuralBody(rejected));
+        }
+    }
+
+    [Theory]
     [InlineData(3)] [InlineData(4)]
     public void Composite_apply_verifier_holds(int reviewerCount)
     {

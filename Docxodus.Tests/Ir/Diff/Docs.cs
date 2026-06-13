@@ -36,6 +36,48 @@ internal static class Docs
         return string.Join("\n", paras);
     }
 
+    /// <summary>
+    /// A normalized, table-aware structural projection of the MAIN document body, in document order: one
+    /// tag per block — <c>"P:"+paragraph text</c> for each body <c>w:p</c>, and for each body <c>w:tbl</c>
+    /// a <c>"TBL"</c> marker followed by a <c>"TC:"+cell text</c> tag per cell (descending row → cell →
+    /// the cell's paragraph text). Unlike <see cref="PlainText"/> (which reads only the body's direct-child
+    /// <c>w:p</c> and silently skips tables), this captures table presence and per-cell content, so a
+    /// consolidate that corrupts or drops a table on the reject path produces a different projection.
+    /// Walks only direct children of <c>w:body</c> so nested tables surface through their parent cell's text.
+    /// Footnote text is intentionally NOT included here (footnote round-trip is asserted separately).
+    /// </summary>
+    public static string StructuralBody(WmlDocument d)
+    {
+        var ns = (XNamespace)IrTestDocuments.W;
+        var doc = XDocument.Parse(MainPartXml(d));
+        var body = doc.Root?.Element(ns + "body");
+        if (body is null)
+            return string.Empty;
+
+        var sb = new StringBuilder();
+        foreach (var block in body.Elements())
+        {
+            if (block.Name == ns + "p")
+            {
+                sb.Append("P:")
+                  .Append(string.Concat(block.Descendants(ns + "t").Select(t => t.Value)))
+                  .Append('\n');
+            }
+            else if (block.Name == ns + "tbl")
+            {
+                sb.Append("TBL\n");
+                foreach (var tr in block.Elements(ns + "tr"))
+                    foreach (var tc in tr.Elements(ns + "tc"))
+                        sb.Append("TC:")
+                          .Append(string.Concat(tc.Descendants(ns + "t").Select(t => t.Value)))
+                          .Append('\n');
+            }
+            // Other body-level blocks (e.g. sectPr) are ignored — they are not part of the
+            // content structure this oracle compares.
+        }
+        return sb.ToString();
+    }
+
     /// <summary>The main document part XML as a string.</summary>
     public static string MainPartXml(WmlDocument d)
     {

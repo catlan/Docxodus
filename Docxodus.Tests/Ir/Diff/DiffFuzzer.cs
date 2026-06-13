@@ -134,9 +134,10 @@ internal static class DiffFuzzer
     /// A K-reviewer composite fuzz case (Task 5.2): one shared base plus <c>reviewerCount</c> reviewer
     /// documents, each = the base with a DISJOINT partition of comparable mutations applied (reviewer
     /// <c>i</c> edits only body paragraphs where <c>index % reviewerCount == i</c>). Built for the
-    /// consolidate own-oracle — round-trip (reject ≡ base) and the composite apply-verifier — so only the
-    /// cross-reviewer-clean COMPARABLE kinds participate (EditWord / InsertParagraph / DeleteParagraph /
-    /// EditTableCell / EditFootnote); Relocate / Bold / Split / Merge are excluded for v1.
+    /// consolidate own-oracle — round-trip (reject ≡ base) and the composite apply-verifier — so the
+    /// reviewer mutation pool is paragraph-only (<see cref="PickCompositeMutation"/>:
+    /// EditWord / InsertParagraph / DeleteParagraph); EditTableCell / EditFootnote and the non-comparable
+    /// Relocate / Bold / Split / Merge are all excluded for v1.
     /// </summary>
     /// <param name="Seed">The seed that deterministically generated this case.</param>
     /// <param name="Base">The shared base document bytes every reviewer revised.</param>
@@ -251,29 +252,50 @@ internal static class DiffFuzzer
     /// the cross-reviewer-clean comparable kinds. A small deliberate-collision chance lets two reviewers
     /// touch the same paragraph — the round-trip oracle still holds.
     /// </summary>
-    public static CompositeFuzzCase GenerateComposite(int seed, int reviewerCount)
+    public static CompositeFuzzCase GenerateComposite(int seed, int reviewerCount) =>
+        GenerateComposite(seed, reviewerCount, keepStructure: false);
+
+    /// <summary>
+    /// Like <see cref="GenerateComposite(int,int)"/>, but KEEPS any table / footnote the base generated
+    /// instead of stripping them. The reviewer MUTATIONS are still restricted to the paragraph-only pool
+    /// (EditWord / InsertParagraph / DeleteParagraph) so the merge stays on the supported v1 path — the
+    /// point is to fuzz that the BASE's table/footnote STRUCTURE survives a consolidate + reject, not that
+    /// table/footnote edits merge. Consumed by the composite STRUCTURAL round-trip test, which compares a
+    /// table-aware projection of the body (not the paragraph-only <c>Docs.PlainText</c>).
+    /// </summary>
+    public static CompositeFuzzCase GenerateCompositeWithStructure(int seed, int reviewerCount) =>
+        GenerateComposite(seed, reviewerCount, keepStructure: true);
+
+    private static CompositeFuzzCase GenerateComposite(int seed, int reviewerCount, bool keepStructure)
     {
         var rng = new Random(seed);
 
         var baseModel = GenerateBase(rng, out _, out _);
 
-        // v1 composite set excludes FOOTNOTES entirely. The footnote-reference run tokenizes to an atomic
-        // NoteRef token (MatchKey "fn") that the apply-verifier's text view counts but the test's
-        // body-only Docs.PlainText (which reads w:t only) does not — a text-projection asymmetry in the
-        // harness, not a consolidate defect. (The composite merger also does not yet merge note-scope
-        // content — NoteOps is always null — so a reviewer footnote edit would be silently dropped; that
-        // is tracked for a later note-consolidation task.) Strip the footnote from the base so neither the
-        // base nor any reviewer carries one, keeping the own-oracle clean. EditFootnote is likewise absent
-        // from PickCompositeMutation's pool.
-        baseModel.FootnoteText = null;
+        if (!keepStructure)
+        {
+            // v1 composite set excludes FOOTNOTES entirely. The footnote-reference run tokenizes to an
+            // atomic NoteRef token (MatchKey "fn") that the apply-verifier's text view counts but the test's
+            // body-only Docs.PlainText (which reads w:t only) does not — a text-projection asymmetry in the
+            // harness, not a consolidate defect. (The composite merger also does not yet merge note-scope
+            // content — NoteOps is always null — so a reviewer footnote edit would be silently dropped; that
+            // is tracked for a later note-consolidation task.) Strip the footnote from the base so neither
+            // the base nor any reviewer carries one, keeping the own-oracle clean. EditFootnote is likewise
+            // absent from PickCompositeMutation's pool.
+            baseModel.FootnoteText = null;
 
-        // Same asymmetry for TABLES: the apply-verifier reconstructs a non-paragraph block as its content
-        // hash (BlockText → ContentHash.ToHex()), while the test's body oracle Docs.PlainText reads only the
-        // body's direct-child w:p elements (table cell paragraphs are excluded). A table can therefore never
-        // match in the apply-verifier's text projection, so the v1 composite set carries no table and
-        // EditTableCell is omitted from the pool. Round-trip (reject ≡ base) still validates the full body
-        // including any structure; only this body-text apply-verifier needs the paragraph-only shape.
-        baseModel.Table = null;
+            // Same asymmetry for TABLES: the apply-verifier reconstructs a non-paragraph block as its
+            // content hash (BlockText → ContentHash.ToHex()), while the test's body oracle Docs.PlainText
+            // reads only the body's direct-child w:p elements (table cell paragraphs are excluded). A table
+            // can therefore never match in the apply-verifier's text projection, so the v1 composite set
+            // carries no table and EditTableCell is omitted from the pool. Round-trip (reject ≡ base) still
+            // validates the full body including any structure; only this body-text apply-verifier needs the
+            // paragraph-only shape.
+            baseModel.Table = null;
+        }
+        // When keepStructure is true the base's table/footnote (if generated) are retained. Reviewer
+        // mutations stay paragraph-only regardless (PickCompositeMutation's pool), so a consolidate runs on
+        // the supported v1 path while a table-aware structural oracle asserts the base structure survives.
 
         var baseBytes = Serialize(baseModel).DocumentByteArray;
 
