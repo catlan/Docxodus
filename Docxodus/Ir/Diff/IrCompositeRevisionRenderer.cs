@@ -52,13 +52,25 @@ internal static class IrCompositeRevisionRenderer
         IReadOnlyList<(string Author, IrDocument Ir)> reviewers,
         IrDiffSettings settings)
     {
+        // Move-source pre-pass over the WHOLE composite script. Single-source ops are each rendered in
+        // their own one-op mini-script (so IrRevisionRenderer honours per-op granularity/author), but a
+        // MoveModifyBlock destination's token diff Delete spans index its SOURCE block's tokens — and the
+        // two-way renderer recovers that source anchor from the source op (IsMoveSource=true) being present
+        // in the same script. In a one-op mini-script the source op is absent, so the destination's
+        // in-transit Delete text would render empty. Map each MoveGroupId to its source op here so a
+        // destination op can carry its paired source op into the mini-script and stay paired.
+        var moveSourceOp = new Dictionary<int, IrEditOp>();
+        foreach (var op in script.Operations)
+            if (op.AuthoredTokens == null && op.Op.IsMoveSource == true && op.Op.MoveGroupId is { } gid)
+                moveSourceOp[gid] = op.Op;
+
         var result = new List<(IrRevision, string, int?)>();
         foreach (var op in script.Operations)
         {
             if (op.AuthoredTokens != null)
                 RenderComposed(op, baseIr, reviewers, settings, script.Conflicts, result);
             else
-                RenderSingleSource(op, baseIr, reviewers, settings, result);
+                RenderSingleSource(op, baseIr, reviewers, settings, moveSourceOp, result);
         }
         return result;
     }
@@ -75,20 +87,42 @@ internal static class IrCompositeRevisionRenderer
         IrDocument baseIr,
         IReadOnlyList<(string Author, IrDocument Ir)> reviewers,
         IrDiffSettings settings,
+        IReadOnlyDictionary<int, IrEditOp> moveSourceOp,
         List<(IrRevision, string, int?)> sink)
     {
         bool baseSourced = op.SourceReviewer < 0;
         var rightIr = baseSourced ? baseIr : reviewers[op.SourceReviewer].Ir;
         string author = baseSourced ? settings.AuthorForRevisions : op.Author;
 
-        // One-op script projected against (base, contributing reviewer). The author override flows through
-        // settings so every revision the two-way renderer stamps carries the reviewer's name.
-        var oneOpScript = new IrEditScript(IrNodeList.From(new[] { op.Op }));
+        // Mini-script projected against (base, contributing reviewer). The author override flows through
+        // settings so every revision the two-way renderer stamps carries the reviewer's name. A move
+        // DESTINATION op (IsMoveSource==false) needs its paired SOURCE op in the same script so the
+        // two-way renderer's move-source pre-pass can resolve the source anchor (otherwise a
+        // MoveModifyBlock destination's in-transit Delete text renders empty). Prepend the paired source
+        // op when this op is a move destination; the source op is itself emitted separately as its own
+        // composite op, so it is rendered exactly once there — here it only seeds the pre-pass map. We
+        // therefore keep only the destination op's revisions and drop the (duplicate) source revisions.
+        IrEditOp[] miniOps = new[] { op.Op };
+        bool isMoveDestination = false;
+        if (op.Op.IsMoveSource == false && op.Op.MoveGroupId is { } gid &&
+            moveSourceOp.TryGetValue(gid, out var srcOp))
+        {
+            isMoveDestination = true;
+            miniOps = new[] { srcOp, op.Op };
+        }
+
+        var oneOpScript = new IrEditScript(IrNodeList.From(miniOps));
         var perOpSettings = settings with { AuthorForRevisions = author };
         var rendered = IrRevisionRenderer.Render(oneOpScript, baseIr, rightIr, perOpSettings);
 
         foreach (var rev in rendered)
+        {
+            // When we seeded the pre-pass with the paired source op, suppress the source-side revisions it
+            // produced (IsMoveSource==true): the source op renders them itself as its own composite op.
+            if (isMoveDestination && rev.IsMoveSource == true)
+                continue;
             sink.Add((rev, rev.Author, op.ConflictId));
+        }
     }
 
     // ------------------------------------------------------------------ composed multi-reviewer paragraph
@@ -196,13 +230,39 @@ internal static class IrCompositeRevisionRenderer
         return tokens;
     }
 
-    /// <summary>The id of the recorded conflict whose base-token span covers <paramref name="basePos"/>, or
-    /// null when no conflict span (including a block-level [x,x) conflict) contains it.</summary>
+    /// <summary>The id of the recorded conflict whose base-token span links <paramref name="basePos"/>, or
+    /// null when no conflict span links it.
+    /// <para>Two conflict shapes need different matching against an authored token op's
+    /// <c>LeftStart</c> anchor:</para>
+    /// <list type="bullet">
+    /// <item><b>Zero-width insert conflict</b> (<c>[pos, pos)</c>, recorded by
+    /// <c>ComposeInsertsAt</c> for insert-vs-insert): the competing inserts are all anchored exactly at
+    /// <c>pos</c>, so match the anchor position exactly.</item>
+    /// <item><b>Delete/replace conflict</b> (<c>[pos, pos+1)</c>, recorded by <c>ComposeBaseTokenAt</c>):
+    /// the deleted base token's revision anchors at <c>pos</c>, but a replacement Insert is anchored at
+    /// the differ's <c>Delete.LeftEnd</c> = the right boundary <c>TokenEnd</c> (not <c>TokenStart</c>).
+    /// Matching the half-open interval INCLUSIVE of the right boundary links both the delete and its
+    /// replacement insert to the conflict.</item>
+    /// </list>
+    /// <para><b>Over-linking.</b> Including the right boundary means an authored op anchored exactly at a
+    /// delete/replace conflict's <c>TokenEnd</c> matches. Equal spans emit no revision (the Equal case
+    /// returns early), so they never over-link. In the compose path the op anchored at a delete's
+    /// <c>LeftEnd</c> is the replacement Insert keyed to that deleted span (the merger excludes
+    /// replacement-Inserts from the standalone insert path and emits them only via the delete path), so
+    /// the right-boundary match links the intended replacement rather than an unrelated insert. The only
+    /// residual risk — a standalone, non-replacement Insert that coincidentally anchors at a delete
+    /// conflict's <c>TokenEnd</c> — does not arise here: such an insert would be anchored at the next base
+    /// position and recorded (if conflicting) as its own zero-width conflict at that position.</para></summary>
     private static int? ConflictIdAt(List<IrConflict> blockConflicts, int basePos)
     {
         foreach (var c in blockConflicts)
-            if (c.TokenStart <= basePos && basePos < c.TokenEnd)
+        {
+            bool match = c.TokenStart == c.TokenEnd
+                ? basePos == c.TokenStart                          // zero-width insert conflict: match anchor
+                : c.TokenStart <= basePos && basePos <= c.TokenEnd; // delete/replace: include right boundary
+            if (match)
                 return c.Id;
+        }
         return null;
     }
 
