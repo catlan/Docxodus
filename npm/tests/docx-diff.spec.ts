@@ -149,25 +149,29 @@ test.describe('DocxDiff consolidate (composite N-way) bridge', () => {
   });
 
   test('GetConflicts reports overlapping reviewer edits', async ({ page }) => {
-    const base = readTestFile('WC/WC001-Digits.docx');
-    const rev = readTestFile('WC/WC001-Digits-Mod.docx');
+    // Two reviewers edit the SAME word differently ("quick" -> "SLOW" vs "FAST"),
+    // which is a genuine cross-reviewer token-overlap conflict. (Two reviewers making
+    // the IDENTICAL edit would be a consensus, not a conflict, and yield zero.)
+    const base = readTestFile('RC/RC100-Conflict-Base.docx');
+    const alice = readTestFile('RC/RC100-Conflict-Alice.docx');
+    const bob = readTestFile('RC/RC100-Conflict-Bob.docx');
 
     const result = await page.evaluate(
-      ([b, r]) => {
+      ([b, a, f]) => {
         return (window as any).DocxodusTests.docxDiffGetConflicts(
           new Uint8Array(b),
           [
-            { author: 'Alice', document: new Uint8Array(r) },
-            { author: 'Bob', document: new Uint8Array(r) },
+            { author: 'Alice', document: new Uint8Array(a) },
+            { author: 'Bob', document: new Uint8Array(f) },
           ]
         );
       },
-      [Array.from(base), Array.from(rev)]
+      [Array.from(base), Array.from(alice), Array.from(bob)]
     );
 
     expect(result.error).toBeUndefined();
     expect(Array.isArray(result.conflicts)).toBe(true);
-    // Two reviewers editing the same span produce at least one conflict, each
+    // The overlapping edit on the same word produces at least one conflict, each
     // with its competing per-author variants.
     expect(result.conflicts.length).toBeGreaterThan(0);
     for (const c of result.conflicts) {
