@@ -163,7 +163,8 @@ function handleConvert(
         options?.showDeletedContent ?? true,
         options?.renderMoveOperations ?? true,
         options?.renderUnsupportedContentPlaceholders ?? false,
-        options?.documentLanguage ?? null
+        options?.documentLanguage ?? null,
+        options?.stampAnchors ?? false
       );
     } else if (
       options?.paginationMode !== undefined &&

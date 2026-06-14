@@ -289,6 +289,13 @@ export interface ConversionOptions {
    * Examples: "en-US", "fr-FR", "de-DE", "ja-JP"
    */
   documentLanguage?: string;
+  /**
+   * Stamp block-level elements (p, h1-h6, li, table) with a `data-anchor`
+   * attribute carrying the block's stable Unid. Required for the editor to
+   * address blocks in the DOM and drive incremental per-block re-render via
+   * `renderBlockHtml`. Default: false.
+   */
+  stampAnchors?: boolean;
 }
 
 /**
@@ -713,6 +720,12 @@ export interface CompareResult {
 export interface DocxodusWasmExports {
   DocumentConverter: {
     ConvertDocxToHtml: (bytes: Uint8Array) => string;
+    RenderBlockHtml: (
+      bytes: Uint8Array,
+      anchorId: string,
+      cssPrefix: string,
+      fabricateClasses: boolean
+    ) => string;
     ConvertDocxToHtmlWithOptions: (
       bytes: Uint8Array,
       pageTitle: string,
@@ -769,7 +782,8 @@ export interface DocxodusWasmExports {
       showDeletedContent: boolean,
       renderMoveOperations: boolean,
       renderUnsupportedContentPlaceholders: boolean,
-      documentLanguage: string | null
+      documentLanguage: string | null,
+      stampAnchors: boolean
     ) => string;
     GetAnnotations: (bytes: Uint8Array) => string;
     AddAnnotation: (bytes: Uint8Array, requestJson: string) => string;
