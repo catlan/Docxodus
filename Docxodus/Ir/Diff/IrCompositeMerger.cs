@@ -27,7 +27,9 @@ internal static class IrCompositeMerger
         Docxodus.ConflictResolution policy,
         IrDiffSettings settings)
     {
-        var scripts = reviewers.Select(r => IrEditScriptBuilder.Build(baseIr, r.Ir, settings)).ToList();
+        var scripts = reviewers
+            .Select(r => LowerStructuralOps(IrEditScriptBuilder.Build(baseIr, r.Ir, settings)))
+            .ToList();
         var baseOrder = BaseBlockAnchors(baseIr);
         var byBase = GroupByBaseAnchor(scripts);
         var insertsAfter = GroupInsertsByPrecedingAnchor(scripts);
@@ -42,6 +44,97 @@ internal static class IrCompositeMerger
             EmitInsertsAt(insertsAfter, anchor, reviewers, ops);
         }
         return new IrCompositeScript(IrNodeList.From(ops), IrNodeList.From(conflicts));
+    }
+
+    /// <summary>
+    /// Rewrite a reviewer's pairwise edit script so it contains NO structural op
+    /// (<see cref="IrEditOpKind.MoveBlock"/> / <see cref="IrEditOpKind.MoveModifyBlock"/> /
+    /// <see cref="IrEditOpKind.SplitBlock"/> / <see cref="IrEditOpKind.MergeBlock"/>) — lowering each to
+    /// equivalent <see cref="IrEditOpKind.InsertBlock"/> / <see cref="IrEditOpKind.DeleteBlock"/> ops,
+    /// PRESERVING op order (the preceding-anchor insert routing depends on order).
+    /// <para><b>Why.</b> The N-way merger groups each reviewer's ops by base anchor
+    /// (<see cref="GroupByBaseAnchor"/>, keyed on <see cref="IrEditOp.LeftAnchor"/>) and routes right-only
+    /// inserts by preceding anchor (<see cref="GroupInsertsByPrecedingAnchor"/>, only for
+    /// <see cref="IrEditOpKind.InsertBlock"/>). A structural op with a NULL left anchor — a move/move-modify
+    /// DESTINATION (RightAnchor set, LeftAnchor null) or a <see cref="IrEditOpKind.MergeBlock"/>
+    /// (RightAnchor set, <see cref="IrEditOp.SplitMergeAnchors"/> = left anchors, LeftAnchor null) — reaches
+    /// NEITHER path and was silently DROPPED, losing the moved/merged content on accept with no conflict
+    /// recorded (reject ≡ base still held — no corruption). Lowering to plain Insert/Delete makes the
+    /// existing Equal/Modify/FormatOnly/Insert/Delete composition handle them with no loss.</para>
+    /// <para><b>Lowering rules</b> (each preserves accept ≡ that reviewer's right body and reject ≡ base):
+    /// <list type="bullet">
+    /// <item>Move/MoveModify SOURCE (IsMoveSource=true, LeftAnchor=X) → <c>DeleteBlock(X)</c>.</item>
+    /// <item>Move/MoveModify DEST (IsMoveSource=false, RightAnchor=Y) → <c>InsertBlock(Y)</c>. A MoveModify
+    /// dest's in-move TokenDiff is discarded — inserting the whole edited destination block is correct
+    /// (accept shows the moved+edited text; the paired source delete removes the original → net
+    /// move-with-edit).</item>
+    /// <item>Split (LeftAnchor=X, SplitMergeAnchors=[R1..Rn] RIGHT anchors) → <c>DeleteBlock(X)</c> then
+    /// <c>InsertBlock(R1)</c> … <c>InsertBlock(Rn)</c> in order, at the split op's position.</item>
+    /// <item>Merge (RightAnchor=Y, SplitMergeAnchors=[L1..Ln] LEFT anchors) → <c>DeleteBlock(L1)</c> …
+    /// <c>DeleteBlock(Ln)</c> then <c>InsertBlock(Y)</c> in order. This DELETES the consumed left base
+    /// blocks (otherwise they passed through as EqualBlock and the merge was ignored) and INSERTS the
+    /// merged result.</item>
+    /// </list></para>
+    /// <para><b>v1 limitation (documented).</b> A single reviewer's move/split/merge therefore consolidates
+    /// as del/ins rather than native <c>w:moveFrom</c>/<c>w:moveTo</c> or split/merge markup; content is
+    /// fully preserved and round-trips. Two reviewers moving the SAME base block become competing
+    /// deletes+inserts — the source-block delete collides in byBase → a recorded conflict, no loss. Native
+    /// cross-reviewer move/split/merge composition is a follow-on.</para>
+    /// </summary>
+    internal static IrEditScript LowerStructuralOps(IrEditScript script)
+    {
+        var lowered = new List<IrEditOp>(script.Operations.Count);
+        foreach (var op in script.Operations)
+        {
+            switch (op.Kind)
+            {
+                case IrEditOpKind.MoveBlock:
+                case IrEditOpKind.MoveModifyBlock:
+                    if (op.IsMoveSource == true)
+                        // Lower the move SOURCE to a DeleteBlock, but RETAIN MoveGroupId/IsMoveSource as a
+                        // marker that this delete is a RELOCATION (the block is reinserted elsewhere by the
+                        // same reviewer), not a plain removal. The renderer/verifier/json dispatch on Kind
+                        // (DeleteBlock), so the retained fields are inert there; the merger reads them to
+                        // distinguish a contested move (2+ reviewers relocate the same base block to
+                        // different places) from a consensus removal — see MergeOneBaseBlock.
+                        lowered.Add(new IrEditOp(IrEditOpKind.DeleteBlock, op.LeftAnchor, null, null,
+                            op.MoveGroupId, IsMoveSource: true));
+                    else
+                        lowered.Add(new IrEditOp(IrEditOpKind.InsertBlock, null, op.RightAnchor, null, null, null));
+                    break;
+
+                case IrEditOpKind.SplitBlock:
+                    // One left base paragraph fans out into N right segments: delete the base block, then
+                    // insert each right segment in order at this position.
+                    lowered.Add(new IrEditOp(IrEditOpKind.DeleteBlock, op.LeftAnchor, null, null, null, null));
+                    if (op.SplitMergeAnchors is { } splitRights)
+                        foreach (var rightAnchor in splitRights)
+                            lowered.Add(new IrEditOp(IrEditOpKind.InsertBlock, null, rightAnchor, null, null, null));
+                    break;
+
+                case IrEditOpKind.MergeBlock:
+                    // N left base paragraphs fuse into one right paragraph: delete each consumed left block
+                    // in order, then insert the merged right result.
+                    if (op.SplitMergeAnchors is { } mergeLefts)
+                        foreach (var leftAnchor in mergeLefts)
+                            lowered.Add(new IrEditOp(IrEditOpKind.DeleteBlock, leftAnchor, null, null, null, null));
+                    lowered.Add(new IrEditOp(IrEditOpKind.InsertBlock, null, op.RightAnchor, null, null, null));
+                    break;
+
+                default:
+                    lowered.Add(op);
+                    break;
+            }
+        }
+
+        System.Diagnostics.Debug.Assert(
+            lowered.All(o => o.Kind is not (IrEditOpKind.MoveBlock or IrEditOpKind.MoveModifyBlock
+                or IrEditOpKind.SplitBlock or IrEditOpKind.MergeBlock)),
+            "LowerStructuralOps must leave no Move/Split/Merge op before composite grouping.");
+
+        // Note scopes (footnotes/endnotes) are not part of body grouping; the composite path does not yet
+        // compose them across reviewers, so they pass through unchanged (parity with the pre-lowering shape).
+        return new IrEditScript(IrNodeList.From(lowered), script.NoteOps);
     }
 
     /// <summary>
@@ -466,6 +559,26 @@ internal static class IrCompositeMerger
             ops.Add(new IrCompositeOp(op, reviewers[rev].Author, rev));
             return;
         }
+
+        // CONTESTED RELOCATION: 2+ reviewers each RELOCATED this same base block (their move-source ops,
+        // lowered to DeleteBlock with IsMoveSource retained, all anchor here) to DIFFERENT places — the
+        // reviewers AGREE the block leaves its origin but DISAGREE on its destination. Emit the consensus
+        // removal ONCE (so reject ≡ base and the origin is not duplicated) and RECORD a conflict for the
+        // placement disagreement; each reviewer's relocating INSERT is routed independently by preceding
+        // anchor (EmitInsertsAt), so every destination survives accept — no content loss under any policy.
+        // The recorded conflict is deliberately NOT policy-resolved into the op stream (unlike a block
+        // EDIT conflict): a BaseWins flip-to-keep would WRONGLY restore a block both reviewers removed.
+        if (touched.All(e => e.Op.Kind == IrEditOpKind.DeleteBlock)
+            && touched.Count(e => e.Op.IsMoveSource == true) >= 2)
+        {
+            conflicts.Add(new IrConflict(nextConflictId++, anchor, 0, 0, policy,
+                IrNodeList.From(touched.Select(e =>
+                    new IrConflictCompetitor(reviewers[e.Reviewer].Author,
+                        BlockResultText(e.Op, reviewers[e.Reviewer].Ir, settings))))));
+            ops.Add(new IrCompositeOp(touched[0].Op, reviewers[touched[0].Reviewer].Author, touched[0].Reviewer));
+            return;
+        }
+
         if (AllOpsIdentical(touched, reviewers, settings))            // CONSENSUS
         {
             // Tripwire: a multi-reviewer UNCOMPARABLE edit (table, or section-break/opaque modify — anything
