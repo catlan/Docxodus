@@ -136,6 +136,24 @@ public class IrCompositeMoveTests
         // Global namespacing: gids are unique across reviewers (no two groups share an id).
         var gids = moveGroups.Select(g => g.Key).ToList();
         Assert.Equal(gids.Count, gids.Distinct().Count());
+
+        // End-to-end round-trip: reject ≡ base (the 6-paragraph base restored), and accept carries each
+        // moved block's distinguishing word EXACTLY ONCE (no duplication from a doubled move half, no loss
+        // from a dropped one) — proving the two distinct global move groups render coherently together.
+        var merged = DocxDiff.Consolidate(
+            b,
+            new[]
+            {
+                new DocxDiffReviewer { Document = alice, Author = "Alice" },
+                new DocxDiffReviewer { Document = bob, Author = "Bob" },
+            },
+            new DocxDiffConsolidateSettings { ConflictResolution = ConflictResolution.BaseWins });
+
+        Assert.Equal(Docs.PlainText(b), Docs.PlainText(RevisionProcessor.RejectRevisions(merged)));
+
+        var accepted = Docs.PlainText(RevisionAccepter.AcceptRevisions(merged));
+        Assert.Equal(1, CountOccurrences(accepted, "delta"));     // Alice's moved P2 distinguishing word
+        Assert.Equal(1, CountOccurrences(accepted, "november")); // Bob's moved P5 distinguishing word
     }
 
     // ---- 3. Move-vs-edit SAME base block → lowered + recorded conflict; no native move ----
@@ -181,6 +199,77 @@ public class IrCompositeMoveTests
 
         // reject ≡ base under all policies.
         AssertRejectEqualsBaseAllPolicies(b, ("Alice", alice), ("Bob", bob));
+    }
+
+    // ---- 4b. Merge collides with a move of a CONSUMED paragraph → no orphaned native move ----
+
+    [Fact]
+    public void Merge_collides_with_move_of_consumed_paragraph_no_orphan_move()
+    {
+        // Base: four ≥4-word paragraphs. L1/L2 carry sentence boundaries so the aligner detects a MERGE
+        // when a reviewer combines them into one paragraph (the proven merge-detection shape).
+        const string L1 = "Alpha alpha words here.";
+        const string L2 = "Beta beta words here.";
+        const string L3 = "Gamma gamma words here.";
+        const string L4 = "Delta delta words here.";
+        var b = Docs.Para(L1, L2, L3, L4);
+
+        // Alice MERGES L1 + L2 into a single paragraph. A MergeBlock consumes L1 and L2 as its
+        // SplitMergeAnchors (left anchors); MergeBlock's own LeftAnchor is null.
+        var alice = Docs.Para(L1 + " " + L2, L3, L4);
+        // Bob MOVES L1 to the end (a relocation whose move-SOURCE anchors at L1's base block).
+        var bob = Docs.Para(L2, L3, L4, L1);
+
+        // Precondition: the aligner MUST actually detect Alice's edit as a MergeBlock (otherwise this
+        // fixture would not exercise the PlanMoves MergeBlock-toucher path at all).
+        var aliceJson = DocxDiff.GetEditScriptJson(b, alice);
+        Assert.Contains("\"kind\": \"MergeBlock\"", aliceJson);
+
+        var s = Merge(b, ("Alice", alice), ("Bob", bob));
+
+        // THE BUG (HEAD 8e33518): PlanMoves builds touchersByBaseAnchor from each reviewer's raw ops keyed
+        // on op.LeftAnchor. A MergeBlock has LeftAnchor == null and carries its consumed paragraphs in
+        // SplitMergeAnchors, so L1/L2 are NEVER registered as touched by Alice. Bob's move of L1 then looks
+        // like a sole-toucher → it is misclassified NATIVE, emitting a w:moveTo destination with no coherent
+        // paired w:moveFrom once Alice's merge (lowered to deletes of L1+L2) resolves → an orphaned half-move.
+        // After the fix the merge registers L1/L2 as touched, so Bob's move of L1 is no longer a sole-toucher
+        // → it lowers to del/ins. (The two deletes of L1 — Alice's merge-delete and Bob's relocation-delete —
+        // are genuine consensus that L1 leaves its origin, so no conflict is recorded; the contract's
+        // collision guarantee is "lowered / no content lost", and content IS fully preserved below.)
+        Assert.DoesNotContain(s.Operations,
+            o => o.Op.Kind is IrEditOpKind.MoveBlock or IrEditOpKind.MoveModifyBlock);
+
+        // End-to-end under every policy: reject ≡ base, NO orphaned move markup (equal — indeed zero — counts
+        // of moveFrom/moveTo range starts), and NO content lost (every base paragraph's distinguishing word
+        // survives accept).
+        foreach (var policy in new[] { ConflictResolution.BaseWins, ConflictResolution.FirstReviewerWins, ConflictResolution.StackAll })
+        {
+            var merged = DocxDiff.Consolidate(
+                b,
+                new[]
+                {
+                    new DocxDiffReviewer { Document = alice, Author = "Alice" },
+                    new DocxDiffReviewer { Document = bob, Author = "Bob" },
+                },
+                new DocxDiffConsolidateSettings { ConflictResolution = policy });
+
+            // reject restores the base exactly.
+            Assert.Equal(Docs.PlainText(b), Docs.PlainText(RevisionProcessor.RejectRevisions(merged)));
+
+            // No orphaned half-move: moveFrom/moveTo range starts are balanced, and zero — the move lowered.
+            var xml = Docs.MainPartXml(merged);
+            int moveFrom = CountOccurrences(xml, "moveFromRangeStart");
+            int moveTo = CountOccurrences(xml, "moveToRangeStart");
+            Assert.Equal(moveFrom, moveTo);
+            Assert.Equal(0, moveTo);
+
+            // No content lost: every base paragraph's distinguishing word is present on accept.
+            var accept = Docs.PlainText(RevisionAccepter.AcceptRevisions(merged));
+            Assert.Contains("Alpha", accept);  // L1 (relocated by Bob and merged by Alice)
+            Assert.Contains("Beta", accept);   // L2 (merged into L1 by Alice)
+            Assert.Contains("Gamma", accept);  // L3 untouched
+            Assert.Contains("Delta", accept);  // L4 untouched
+        }
     }
 
     // ---- 5. DetectMoves=false ⇒ no native MoveBlock op (lowered) — gate test ----

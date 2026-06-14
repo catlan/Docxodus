@@ -86,15 +86,33 @@ internal static class IrCompositeMerger
     /// </summary>
     internal static MovePlan PlanMoves(IReadOnlyList<IrEditScript> rawScripts, IrDiffSettings settings)
     {
-        // touchersByBaseAnchor: base anchor → reviewers with a non-Equal op anchored (LeftAnchor) there.
+        // touchersByBaseAnchor: base anchor → reviewers with a non-Equal op anchored at that base block.
         // A move SOURCE (IsMoveSource=true) anchors at its source base block via LeftAnchor; a ModifyBlock/
-        // DeleteBlock/FormatOnlyBlock also carries the base block's LeftAnchor; a move DEST / InsertBlock has
-        // a null LeftAnchor and so never marks a base block as touched (it is right-positioned content).
+        // DeleteBlock/FormatOnlyBlock/SplitBlock also carries the base block's LeftAnchor; a move DEST /
+        // InsertBlock has a null LeftAnchor and so never marks a base block as touched (it is right-positioned
+        // content). A MergeBlock is the exception the LeftAnchor path MISSES: its own LeftAnchor is null
+        // (RightAnchor carries the merged result) and it CONSUMES N base paragraphs carried in
+        // SplitMergeAnchors (left anchors). Those consumed anchors must be registered as touched too —
+        // otherwise a reviewer who MERGES L1+L2 is invisible at L1/L2, and another reviewer's MOVE of L1
+        // would be misclassified as a sole-toucher native move, emitting a w:moveTo with no coherent paired
+        // w:moveFrom once the merge's lowered deletes resolve (an orphaned half-move). SplitBlock needs no
+        // such branch: its LeftAnchor IS its single consumed base paragraph, so the main path already counts
+        // it (a SplitBlock's SplitMergeAnchors are RIGHT segment anchors, not base blocks).
         var touchers = new Dictionary<string, HashSet<int>>();
         for (int reviewer = 0; reviewer < rawScripts.Count; reviewer++)
         {
             foreach (var op in rawScripts[reviewer].Operations)
             {
+                if (op.Kind == IrEditOpKind.MergeBlock && op.SplitMergeAnchors is { } mergeLefts)
+                {
+                    foreach (var la in mergeLefts)
+                    {
+                        if (!touchers.TryGetValue(la, out var ms))
+                            touchers[la] = ms = new HashSet<int>();
+                        ms.Add(reviewer);
+                    }
+                    continue;
+                }
                 if (op.Kind == IrEditOpKind.EqualBlock || op.LeftAnchor is not { } anchor)
                     continue;
                 if (!touchers.TryGetValue(anchor, out var set))
