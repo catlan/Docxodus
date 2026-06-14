@@ -141,4 +141,54 @@ public class IrCompositeFixTests
         Assert.Equal(Docs.StructuralBody(baseDoc),
             Docs.StructuralBody(RevisionProcessor.RejectRevisions(merged)));
     }
+
+    // ---- B4 generalization: NON-paragraph, non-table modifies (section breaks / opaque blocks) ----
+    //
+    // BlockResultText returns "" for ANY non-paragraph block, so before the generalization the empty-text
+    // "all ops identical" consensus also fired for two reviewers DIFFERENTLY editing the same base section
+    // break (a standalone body w:sectPr → IrSectionBreak block; ModifyBlock with BOTH TokenDiff AND TableDiff
+    // null) — silently dropping all but the first reviewer and recording NO conflict. The generalized
+    // IsUncomparableModify (op.Kind == ModifyBlock && op.TokenDiff == null) now covers tables AND
+    // section-break/opaque modifies, routing them to the recorded block-level conflict. A paragraph modify
+    // always carries TokenDiff != null and is unaffected (still composes / reaches genuine text consensus).
+
+    /// <summary>A two-section base: a standalone first-section <c>w:sectPr</c> (its own body block) whose
+    /// page size differs from the trailing section's, so it reads as an <see cref="Docxodus.Ir.IrSectionBreak"/>
+    /// body block both reviewers can edit.</summary>
+    private static WmlDocument TwoSectionBase() => IrTestDocuments.FromBodyXml(
+        "<w:p><w:r><w:t>first section body</w:t></w:r></w:p>" +
+        "<w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/></w:sectPr>" +
+        "<w:p><w:r><w:t>second section body</w:t></w:r></w:p>" +
+        "<w:sectPr><w:pgSz w:w=\"15840\" w:h=\"12240\"/></w:sectPr>");
+
+    /// <summary>The same shape as <see cref="TwoSectionBase"/> but with the FIRST (standalone) section's
+    /// page size overridden to <paramref name="firstSectionW"/>×<paramref name="firstSectionH"/>, so a
+    /// reviewer "edits" the standalone section break.</summary>
+    private static WmlDocument TwoSectionVariant(string firstSectionW, string firstSectionH) =>
+        IrTestDocuments.FromBodyXml(
+            "<w:p><w:r><w:t>first section body</w:t></w:r></w:p>" +
+            $"<w:sectPr><w:pgSz w:w=\"{firstSectionW}\" w:h=\"{firstSectionH}\"/></w:sectPr>" +
+            "<w:p><w:r><w:t>second section body</w:t></w:r></w:p>" +
+            "<w:sectPr><w:pgSz w:w=\"15840\" w:h=\"12240\"/></w:sectPr>");
+
+    [Theory]
+    [InlineData(ConflictResolution.BaseWins)]
+    [InlineData(ConflictResolution.FirstReviewerWins)]
+    [InlineData(ConflictResolution.StackAll)]
+    public void Multireviewer_section_break_edits_record_conflict_not_silent_drop(ConflictResolution policy)
+    {
+        var baseDoc = TwoSectionBase();
+        var alice = TwoSectionVariant("11000", "14000"); // changes the standalone section's page size one way
+        var bob = TwoSectionVariant("9000", "13000");    // changes it a DIFFERENT way → genuine disagreement
+
+        // Both reviewers' section-break edits must be SEEN: a recorded conflict, not a silent drop.
+        Assert.True(
+            Conflicts(baseDoc, policy, ("Alice", alice), ("Bob", bob)).Count >= 1,
+            "Multi-reviewer section-break edits were silently dropped (conflictCount == 0).");
+
+        // reject ≡ base must hold for the section-break-conflict output under every policy.
+        var merged = Consolidate(baseDoc, policy, ("Alice", alice), ("Bob", bob));
+        Assert.Equal(Docs.StructuralBody(baseDoc),
+            Docs.StructuralBody(RevisionProcessor.RejectRevisions(merged)));
+    }
 }

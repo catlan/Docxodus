@@ -468,12 +468,13 @@ internal static class IrCompositeMerger
         }
         if (AllOpsIdentical(touched, reviewers, settings))            // CONSENSUS
         {
-            // Tripwire: a multi-reviewer TABLE edit must never reach the consensus emit (which keeps only
-            // touched[0] and silently drops the rest). v1 routes table edits to the block-level conflict
-            // branch; if one ever lands here a table edit is being silently dropped (B4 regression).
+            // Tripwire: a multi-reviewer UNCOMPARABLE edit (table, or section-break/opaque modify — anything
+            // BlockResultText can't distinguish) must never reach the consensus emit (which keeps only
+            // touched[0] and silently drops the rest). v1 routes such edits to the block-level conflict
+            // branch; if one ever lands here an edit is being silently dropped (B4 regression).
             System.Diagnostics.Debug.Assert(
-                !(touched.Count > 1 && touched.Any(e => IsTableModify(e.Op))),
-                "Multi-reviewer table edit reached consensus emit — a table edit is being silently dropped.");
+                !(touched.Count > 1 && touched.Any(e => IsUncomparableModify(e.Op))),
+                "Multi-reviewer uncomparable edit reached consensus emit — a non-paragraph edit is being silently dropped.");
             var (rev, op) = touched[0];
             ops.Add(new IrCompositeOp(op, reviewers[rev].Author, rev));
             return;
@@ -543,6 +544,10 @@ internal static class IrCompositeMerger
         int cid,
         List<IrCompositeOp> ops)
     {
+        // Capture the pre-emission count so the totality tripwire below scopes to the ops THIS call appends
+        // (O(emitted) per call) rather than rescanning the whole accumulated stream (O(N) → O(N²) over the doc).
+        int priorCount = ops.Count;
+
         // touched[0] stays base-anchored verbatim (lowest reviewer index — base-consuming on reject).
         ops.Add(new IrCompositeOp(touched[0].Op, reviewers[touched[0].Reviewer].Author, touched[0].Reviewer, null, cid));
 
@@ -557,10 +562,11 @@ internal static class IrCompositeMerger
             ops.Add(new IrCompositeOp(insert, reviewers[rev].Author, rev, null, cid));
         }
 
-        // Exactly one emitted op for this block-conflict consumes/restores the base anchor (LeftAnchor ==
-        // anchor) — the block-level analogue of the token path's AssertTilesBase totality invariant.
+        // Exactly one op appended by THIS call consumes/restores the base anchor (LeftAnchor == anchor) — the
+        // block-level analogue of the token path's AssertTilesBase totality invariant. Scoped to ops appended
+        // here (Skip(priorCount)) so the check is O(emitted), not an O(N) rescan of the accumulated stream.
         System.Diagnostics.Debug.Assert(
-            ops.Count(o => o.Op.LeftAnchor == anchor) == 1,
+            ops.Skip(priorCount).Count(o => o.Op.LeftAnchor == anchor) == 1,
             "StackAll block-conflict must emit exactly one base-anchored op (reject ≡ base).");
     }
 
@@ -634,14 +640,15 @@ internal static class IrCompositeMerger
 
         if (kind == IrEditOpKind.ModifyBlock)
         {
-            // A TABLE ModifyBlock (TableDiff != null) must NEVER be treated as identical via the empty-text
-            // shortcut: BlockResultText returns "" for any non-paragraph block, so two reviewers editing the
-            // SAME base table — even DIFFERENT cells — would (mis)compare as ""=="" and short-circuit to a
-            // false consensus, silently dropping every reviewer but the first and recording NO conflict
-            // (data loss). v1 does NOT compose table cells across reviewers, so any multi-reviewer table edit
-            // must fall through to the BLOCK-LEVEL conflict branch (BaseWins keeps the base table + records
-            // the conflict; the other policies surface a recorded conflict too).
-            if (touched.Any(e => IsTableModify(e.Op)))
+            // An UNCOMPARABLE ModifyBlock (no TokenDiff — i.e. a table, or a section-break / opaque modify)
+            // must NEVER be treated as identical via the empty-text shortcut: BlockResultText returns "" for
+            // any non-paragraph block, so two reviewers editing the SAME base table (even DIFFERENT cells) or
+            // the SAME base section break / opaque block — differently — would (mis)compare as ""=="" and
+            // short-circuit to a false consensus, silently dropping every reviewer but the first and recording
+            // NO conflict (data loss). v1 does NOT compose such blocks across reviewers, so any multi-reviewer
+            // edit to them must fall through to the BLOCK-LEVEL conflict branch (BaseWins keeps the base block +
+            // records the conflict; the other policies surface a recorded conflict too).
+            if (touched.Any(e => IsUncomparableModify(e.Op)))
                 return false;
 
             string first = BlockResultText(touched[0].Op, reviewers[touched[0].Reviewer].Ir, settings);
@@ -653,12 +660,22 @@ internal static class IrCompositeMerger
     }
 
     /// <summary>
-    /// True when <paramref name="op"/> is a TABLE ModifyBlock — it carries a nested <see cref="IrEditOp.TableDiff"/>,
-    /// or its resolved right block is not a paragraph (so <see cref="BlockResultText"/> would return "" and the
-    /// empty-text consensus shortcut would falsely fire). v1 does not compose table cells across reviewers, so
-    /// such ops must route to the block-level conflict branch rather than the phantom-consensus path.
+    /// True when <paramref name="op"/> is a ModifyBlock whose result text cannot meaningfully distinguish
+    /// reviewers — so the empty-text consensus shortcut in <see cref="AllOpsIdentical"/> would falsely fire.
+    /// <para>A TABLE modify carries a nested <see cref="IrEditOp.TableDiff"/>; a section-break / opaque modify
+    /// carries NEITHER a <see cref="IrEditOp.TokenDiff"/> nor a <see cref="IrEditOp.TableDiff"/>. In every such
+    /// case <see cref="BlockResultText"/> returns "" (it only serializes paragraph and table right blocks),
+    /// so two reviewers making DIFFERENT edits would (mis)compare as <c>""==""</c> and short-circuit to a
+    /// false consensus — silently dropping every reviewer but the first and recording NO conflict (data loss).
+    /// A PARAGRAPH modify always carries a non-null <see cref="IrEditOp.TokenDiff"/> and is unaffected; it
+    /// composes / reaches genuine text consensus normally.</para>
+    /// <para>Because <c>op.TableDiff != null</c> implies <c>op.TokenDiff == null</c>, the single
+    /// <c>TokenDiff == null</c> predicate subsumes BOTH tables and section-break/opaque modifies. v1 does not
+    /// compose such blocks across reviewers, so multi-reviewer edits to them route to the block-level conflict
+    /// branch rather than the phantom-consensus path.</para>
     /// </summary>
-    private static bool IsTableModify(IrEditOp op) => op.TableDiff != null;
+    private static bool IsUncomparableModify(IrEditOp op) =>
+        op.Kind == IrEditOpKind.ModifyBlock && op.TokenDiff == null;
 
     /// <summary>Tokenize the BASE paragraph at <paramref name="anchor"/> exactly as
     /// <see cref="IrEditScriptBuilder"/> tokenizes a Modified pair's left side, so token indices line up with
