@@ -28,6 +28,8 @@ export interface DocxEditorExports {
     ReplaceText: (handle: number, anchor: string, md: string) => string;
     SplitParagraph: (handle: number, anchor: string, offset: number) => string;
     MergeParagraphs: (handle: number, first: string, second: string) => string;
+    ApplyFormat: (handle: number, anchor: string, spanJson: string, opJson: string) => string;
+    SetParagraphStyle: (handle: number, anchor: string, styleId: string) => string;
     RenderBlockHtml: (
       handle: number,
       anchorId: string,
@@ -35,8 +37,8 @@ export interface DocxEditorExports {
       fabricateClasses: boolean,
     ) => string;
     Save: (handle: number) => Uint8Array;
-    Undo: (handle: number) => string;
-    Redo: (handle: number) => string;
+    Undo: (handle: number) => boolean;
+    Redo: (handle: number) => boolean;
   };
   DocumentConverter: {
     ConvertDocxToHtmlComplete: (...args: any[]) => string;
@@ -46,7 +48,12 @@ export interface DocxEditorExports {
 export interface DocxEditorOptions {
   /** CSS class prefix for rendered HTML. Default "docx-". */
   cssPrefix?: string;
-  /** Fabricate CSS classes (vs inline styles). Default true. */
+  /**
+   * Fabricate CSS classes (vs inline styles). Default FALSE for the editor: a per-block
+   * re-render must be self-contained, but fabricated class names are per-conversion and
+   * have no matching stylesheet on the page, so re-rendered blocks would lose styling.
+   * Inline styles keep every block's formatting intact on incremental re-render.
+   */
   fabricateClasses?: boolean;
   /** Make paragraph/heading blocks editable. Default true. */
   editable?: boolean;
@@ -218,6 +225,77 @@ function placeCaretAtOffset(el: HTMLElement, offset: number): void {
   sel.addRange(range);
 }
 
+// ─── M5: formatting controls ────────────────────────────────────────────────
+
+export type FormatKey = "bold" | "italic" | "underline" | "strike" | "code";
+
+/** The selection's plain-text {start,length} within `block`, or null (collapsed / outside). */
+function selectionSpanIn(block: HTMLElement): { start: number; length: number } | null {
+  const sel = typeof window !== "undefined" ? window.getSelection() : null;
+  if (!sel || sel.rangeCount === 0) return null;
+  const range = sel.getRangeAt(0);
+  if (range.collapsed) return null;
+  if (!block.contains(range.startContainer) || !block.contains(range.endContainer)) return null;
+  const pre = range.cloneRange();
+  pre.selectNodeContents(block);
+  pre.setEnd(range.startContainer, range.startOffset);
+  return { start: pre.toString().length, length: range.toString().length };
+}
+
+/** Restore a text selection spanning [start, start+length) within `el`. */
+function selectRange(el: HTMLElement, start: number, length: number): void {
+  const sel = typeof window !== "undefined" ? window.getSelection() : null;
+  if (!sel) return;
+  el.focus();
+  const range = document.createRange();
+  const end = start + length;
+  let pos = 0;
+  let startSet = false;
+  const walk = (node: Node): boolean => {
+    for (const child of Array.from(node.childNodes)) {
+      if (child.nodeType === 3 /* TEXT_NODE */) {
+        const len = child.textContent?.length ?? 0;
+        if (!startSet && pos + len >= start) {
+          range.setStart(child, start - pos);
+          startSet = true;
+        }
+        if (startSet && pos + len >= end) {
+          range.setEnd(child, end - pos);
+          return true;
+        }
+        pos += len;
+      } else if (walk(child)) {
+        return true;
+      }
+    }
+    return false;
+  };
+  if (walk(el) || startSet) {
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+}
+
+/** Whether the current selection's start already carries `key`, read from computed style. */
+function selectionHasFormat(key: FormatKey, fallback: HTMLElement): boolean {
+  const sel = typeof window !== "undefined" ? window.getSelection() : null;
+  let el: HTMLElement | null = fallback;
+  if (sel && sel.rangeCount > 0) {
+    const n = sel.getRangeAt(0).startContainer;
+    el = n.nodeType === 3 ? n.parentElement : (n as HTMLElement);
+  }
+  if (!el || typeof getComputedStyle !== "function") return false;
+  const cs = getComputedStyle(el);
+  switch (key) {
+    case "bold": return fontWeightIsBold(cs.fontWeight);
+    case "italic": return cs.fontStyle === "italic" || cs.fontStyle === "oblique";
+    case "underline": return cs.textDecorationLine.includes("underline");
+    case "strike": return cs.textDecorationLine.includes("line-through");
+    case "code": return /mono|courier|consolas/i.test(cs.fontFamily);
+    default: return false;
+  }
+}
+
 /** Build the full ConvertDocxToHtmlComplete arg list (stampAnchors = last arg). */
 function completeArgs(
   bytes: Uint8Array,
@@ -244,6 +322,8 @@ export class DocxEditor {
   private readonly unidToFullId = new Map<string, string>();
   /** The element whose [data-anchor] descendants are the editable blocks (container or page container). */
   private editRoot: HTMLElement;
+  /** The most recently focused editable block — the target for ribbon/format commands. */
+  private activeBlock: HTMLElement | null = null;
   private closed = false;
 
   private constructor(
@@ -268,7 +348,7 @@ export class DocxEditor {
   ): DocxEditor {
     const opts = {
       cssPrefix: options.cssPrefix ?? "docx-",
-      fabricateClasses: options.fabricateClasses ?? true,
+      fabricateClasses: options.fabricateClasses ?? false,
       editable: options.editable ?? true,
       paginated: options.paginated ?? false,
       scale: options.scale ?? 1,
@@ -355,6 +435,7 @@ export class DocxEditor {
     if (!unid || !this.unidToFullId.has(unid)) return;
     el.setAttribute("contenteditable", "true");
     el.dataset.committedText = el.textContent ?? "";
+    el.addEventListener("focus", () => { this.activeBlock = el; });
     el.addEventListener("blur", () => this.commitBlock(el));
     el.addEventListener("keydown", (ev) => this.onKeydown(el, ev as KeyboardEvent));
   }
@@ -401,6 +482,7 @@ export class DocxEditor {
         this.unidToFullId.delete(unid);
         this.unidToFullId.set(newUnid, newAnchor);
         this.wireBlock(fresh);
+        if (this.activeBlock === el) this.activeBlock = fresh; // keep ribbon target valid
       }
     }
 
@@ -411,6 +493,14 @@ export class DocxEditor {
 
   private onKeydown(el: HTMLElement, ev: KeyboardEvent): void {
     if (this.closed) return;
+    // Common formatting / history shortcuts.
+    if ((ev.ctrlKey || ev.metaKey) && !ev.altKey) {
+      const k = ev.key.toLowerCase();
+      const fmt: Record<string, FormatKey> = { b: "bold", i: "italic", u: "underline" };
+      if (fmt[k]) { ev.preventDefault(); this.format(fmt[k]); return; }
+      if (k === "z") { ev.preventDefault(); ev.shiftKey ? this.redo() : this.undo(); return; }
+      if (k === "y") { ev.preventDefault(); this.redo(); return; }
+    }
     if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing) {
       ev.preventDefault();
       this.splitAtCaret(el);
@@ -524,5 +614,103 @@ export class DocxEditor {
     } catch {
       return { success: false };
     }
+  }
+
+  // ─── M5: formatting commands (ribbon) ────────────────────────────────
+
+  /**
+   * Toggle (or set) an inline format on the current selection in the active block.
+   * With no selection, applies to the whole paragraph. Routes through DocxSession
+   * (`ApplyFormat`) so it is lossless and supports underline/strike, not just markdown.
+   */
+  format(key: FormatKey, value?: boolean): void {
+    const block = this.activeBlock;
+    if (this.closed || !block) return;
+    const unid = block.getAttribute("data-anchor");
+    if (!unid) return;
+    let fullId = this.unidToFullId.get(unid);
+    if (!fullId) return;
+
+    const span = selectionSpanIn(block);
+    const on = value ?? !selectionHasFormat(key, block);
+    fullId = this.syncBlock(block, fullId); // don't clobber uncommitted typing
+    const res = this.parseEdit(
+      this.exports.DocxSessionBridge.ApplyFormat(
+        this.handle,
+        fullId,
+        span ? JSON.stringify(span) : "",
+        JSON.stringify({ [key]: on }),
+      ),
+    );
+    if (!res.success) return;
+    const fresh = this.swapBlock(block, unid, res.modified?.[0]);
+    if (fresh && span) selectRange(fresh, span.start, span.length);
+    else fresh?.focus();
+  }
+
+  /** Set the paragraph style of the active block (e.g. "Heading1", "Heading2", "Normal"). */
+  setParagraphStyle(styleId: string): void {
+    const block = this.activeBlock;
+    if (this.closed || !block) return;
+    const unid = block.getAttribute("data-anchor");
+    if (!unid) return;
+    let fullId = this.unidToFullId.get(unid);
+    if (!fullId) return;
+    fullId = this.syncBlock(block, fullId);
+    const res = this.parseEdit(this.exports.DocxSessionBridge.SetParagraphStyle(this.handle, fullId, styleId));
+    if (!res.success) return;
+    this.swapBlock(block, unid, res.modified?.[0])?.focus();
+  }
+
+  /** Undo the last edit (re-renders the document). */
+  undo(): void {
+    if (this.closed) return;
+    if (this.exports.DocxSessionBridge.Undo(this.handle)) this.remount();
+  }
+
+  /** Redo the last undone edit (re-renders the document). */
+  redo(): void {
+    if (this.closed) return;
+    if (this.exports.DocxSessionBridge.Redo(this.handle)) this.remount();
+  }
+
+  /** Which inline formats the current selection carries — for ribbon button highlighting. */
+  queryFormatState(): Record<FormatKey, boolean> {
+    const block = this.activeBlock ?? this.editRoot;
+    return {
+      bold: selectionHasFormat("bold", block),
+      italic: selectionHasFormat("italic", block),
+      underline: selectionHasFormat("underline", block),
+      strike: selectionHasFormat("strike", block),
+      code: selectionHasFormat("code", block),
+    };
+  }
+
+  /** Re-render one block from the live session by EditResult ref, swapping it in place. */
+  private swapBlock(oldEl: HTMLElement, oldUnid: string, ref?: AnchorRef): HTMLElement | null {
+    const anchorId = ref?.id ?? this.unidToFullId.get(oldUnid);
+    const newUnid = ref?.unid ?? oldUnid;
+    if (!anchorId) return null;
+    const fresh = this.renderInto(anchorId);
+    if (!fresh) return null;
+    oldEl.replaceWith(fresh);
+    this.unidToFullId.delete(oldUnid);
+    this.unidToFullId.set(newUnid, anchorId);
+    this.wireBlock(fresh);
+    this.activeBlock = fresh;
+    this.options.onEdit?.({ anchorId, unid: newUnid });
+    return fresh;
+  }
+
+  /** Full re-render from current session state (used after undo/redo, which can touch any block). */
+  private remount(): void {
+    this.refreshAnchorMap();
+    const bytes = this.exports.DocxSessionBridge.Save(this.handle);
+    const fullHtml = this.exports.DocumentConverter.ConvertDocxToHtmlComplete(
+      ...completeArgs(bytes, this.options.cssPrefix, this.options.fabricateClasses, this.options.paginated, this.options.scale),
+    );
+    this.activeBlock = null;
+    if (this.options.paginated) this.mountPaginated(fullHtml);
+    else this.mountHtml(fullHtml);
   }
 }

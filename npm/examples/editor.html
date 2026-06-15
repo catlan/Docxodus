@@ -26,21 +26,47 @@
     [contenteditable="true"]:focus { outline: 2px solid #4c8bf5; outline-offset: 2px; border-radius: 2px; }
     [contenteditable="true"]:hover { background: #f3f8ff; }
     .hint { max-width: 920px; margin: 0 auto; padding: 8px 16px; font-size: 12px; color: #65676b; }
+    .sep { width: 1px; align-self: stretch; background: #d7dade; margin: 2px 4px; }
+    .ribbon { display: inline-flex; gap: 4px; align-items: center; }
+    .ribbon[aria-disabled="true"] { opacity: .4; pointer-events: none; }
+    .ribbon button { min-width: 30px; padding: 5px 8px; }
+    .ribbon button.active { background: #d9e7ff; border-color: #4c8bf5; }
+    .ribbon select { font: inherit; padding: 5px 6px; border: 1px solid #c3c7cc; border-radius: 6px; background: #f6f7f8; }
   </style>
 </head>
 <body>
   <header>
     <h1>Docxodus editor</h1>
-    <label class="btn">Open .docx<input id="file" type="file" accept=".docx" hidden /></label>
-    <button id="save" disabled>Save .docx</button>
-    <label class="toggle"><input id="paginated" type="checkbox" /> Paginated (page boxes)</label>
+    <label class="btn">Open<input id="file" type="file" accept=".docx" hidden /></label>
+    <button id="save" disabled>Save</button>
+    <span class="sep"></span>
+    <div class="ribbon" id="ribbon" aria-disabled="true">
+      <button data-cmd="bold" title="Bold (Ctrl+B)"><b>B</b></button>
+      <button data-cmd="italic" title="Italic (Ctrl+I)"><i>I</i></button>
+      <button data-cmd="underline" title="Underline (Ctrl+U)"><u>U</u></button>
+      <button data-cmd="strike" title="Strikethrough"><s>S</s></button>
+      <button data-cmd="code" title="Inline code">&lt;/&gt;</button>
+      <span class="sep"></span>
+      <select id="style" title="Paragraph style">
+        <option value="">Style…</option>
+        <option value="Normal">Normal</option>
+        <option value="Heading1">Heading 1</option>
+        <option value="Heading2">Heading 2</option>
+        <option value="Heading3">Heading 3</option>
+        <option value="Title">Title</option>
+      </select>
+      <span class="sep"></span>
+      <button id="undo" title="Undo (Ctrl+Z)">&#8634;</button>
+      <button id="redo" title="Redo (Ctrl+Shift+Z)">&#8635;</button>
+    </div>
+    <label class="toggle"><input id="paginated" type="checkbox" /> Paginated</label>
     <span class="spacer"></span>
     <span id="status">Booting WASM…</span>
   </header>
   <p class="hint">
-    Click a paragraph or heading to edit it. <b>Enter</b> splits a block, <b>Backspace</b> at the start
-    merges with the previous one. Edits commit on blur and re-render only that block; bold/italic/links are
-    preserved. Tables and content inside them are read-only in this MVP. <b>Save</b> downloads a lossless .docx.
+    Click a paragraph or heading to edit it. Select text and use the ribbon (or <b>Ctrl+B/I/U</b>) to format.
+    <b>Enter</b> splits a block, <b>Backspace</b> at the start merges with the previous one; <b>Ctrl+Z</b> undoes.
+    Edits re-render only the affected block. Tables are read-only in this MVP. <b>Save</b> downloads a lossless .docx.
   </p>
   <div id="editor" class="continuous"></div>
 
@@ -53,8 +79,34 @@
     const saveEl = document.getElementById('save');
     const paginatedEl = document.getElementById('paginated');
     const editorEl = document.getElementById('editor');
+    const ribbonEl = document.getElementById('ribbon');
+    const styleEl = document.getElementById('style');
 
     const setStatus = (s) => { statusEl.textContent = s; };
+
+    // Ribbon wiring. Format buttons preventDefault on mousedown so the editor keeps its
+    // text selection (clicking a button must not blur the contenteditable block).
+    ribbonEl.querySelectorAll('button[data-cmd]').forEach((btn) => {
+      btn.addEventListener('mousedown', (e) => e.preventDefault());
+      btn.addEventListener('click', () => editor && editor.format(btn.dataset.cmd));
+    });
+    for (const id of ['undo', 'redo']) {
+      const b = document.getElementById(id);
+      b.addEventListener('mousedown', (e) => e.preventDefault());
+      b.addEventListener('click', () => editor && editor[id]());
+    }
+    styleEl.addEventListener('change', () => {
+      if (editor && styleEl.value) { editor.setParagraphStyle(styleEl.value); }
+      styleEl.value = '';
+    });
+    // Highlight active formats for the current selection.
+    document.addEventListener('selectionchange', () => {
+      if (!editor) return;
+      const st = editor.queryFormatState();
+      ribbonEl.querySelectorAll('button[data-cmd]').forEach((b) => {
+        b.classList.toggle('active', !!st[b.dataset.cmd]);
+      });
+    });
 
     setStatus('Booting WASM…');
     const { getAssemblyExports, getConfig } = await dotnet.withDiagnosticTracing(false).create();
@@ -77,6 +129,7 @@
       const t0 = performance.now();
       editor = window.DocxodusEditor.DocxEditor.open(editorEl, bytes, exports, { paginated });
       saveEl.disabled = false;
+      ribbonEl.setAttribute('aria-disabled', 'false');
       setStatus(`Rendered in ${Math.round(performance.now() - t0)} ms — edit away.`);
     }
 

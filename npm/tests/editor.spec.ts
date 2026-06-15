@@ -280,4 +280,65 @@ test.describe('DocxEditor — block editor end-to-end', () => {
     expect(out.mergedAlnum).toBe(out.originalAlnum); // text restored exactly
     expect(out.mdLen).toBeGreaterThan(0); // valid doc after structural edits
   });
+
+  // M5: ribbon commands — apply bold to a selection (ApplyFormat), set a paragraph
+  // style (Heading1), and undo. Routes through DocxSession, lossless on save.
+  test('M5: format selection, set style, undo', async ({ page }) => {
+    const bytes = readTestFile('HC031-Complicated-Document.docx');
+
+    const out = await page.evaluate(async (bytesArray: number[]) => {
+      const bin = new Uint8Array(bytesArray);
+      const D = (window as any).Docxodus;
+
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const editor = D.DocxEditor.open(container, bin, D, {});
+
+      const norm = (s: string) => (s || '').replace(/\s+/g, ' ').trim();
+      const editableEls = () =>
+        Array.from(container.querySelectorAll('p[data-anchor][contenteditable="true"]')) as HTMLElement[];
+      const h1count = () => container.querySelectorAll('h1[data-anchor]').length;
+      const selectChars = (el: HTMLElement, start: number, len: number) => {
+        const tn = document.createTreeWalker(el, NodeFilter.SHOW_TEXT).nextNode() as Text | null;
+        const sel = window.getSelection()!;
+        const r = document.createRange();
+        if (tn) { r.setStart(tn, Math.min(start, tn.length)); r.setEnd(tn, Math.min(start + len, tn.length)); }
+        else r.selectNodeContents(el);
+        sel.removeAllRanges();
+        sel.addRange(r);
+      };
+
+      // BOLD the first word of a paragraph via the format command.
+      const b1 = editableEls().find((e) => norm(e.textContent || '').length > 10)!;
+      const word = norm(b1.textContent || '').split(' ')[0];
+      b1.focus();
+      selectChars(b1, 0, word.length);
+      editor.format('bold');
+
+      const saved1: Uint8Array = editor.save();
+      const r1 = D.DocxSessionBridge.OpenSession(saved1, '');
+      const md1 = JSON.parse(D.DocxSessionBridge.Project(r1)).markdown as string;
+      D.DocxSessionBridge.CloseSession(r1);
+
+      // SET STYLE Heading1 on a paragraph, then UNDO it.
+      const h1Before = h1count();
+      const b2 = editableEls().find((e) => norm(e.textContent || '').length > 10)!;
+      b2.focus();
+      editor.setParagraphStyle('Heading1');
+      const h1AfterStyle = h1count();
+      editor.undo();
+      const h1AfterUndo = h1count();
+
+      editor.close();
+      container.remove();
+      return {
+        boldApplied: md1.includes('**' + word + '**'),
+        h1Before, h1AfterStyle, h1AfterUndo,
+      };
+    }, Array.from(bytes));
+
+    expect(out.boldApplied).toBe(true); // bold survived to the saved document
+    expect(out.h1AfterStyle).toBe(out.h1Before + 1); // SetParagraphStyle made a heading
+    expect(out.h1AfterUndo).toBe(out.h1Before); // undo reverted it
+  });
 });

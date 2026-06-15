@@ -5,8 +5,9 @@ PoC results). This is the **sequenced, prioritized** plan for turning the proven
 foundation + MVP into a complete editor. Supersedes the scattered "Still Plan 2" notes.
 
 Status (branch `feat/ir-editor-feasibility-poc`, PR #234): **foundation + MVP shipped and
-proven; M1 (rich in-block editing) and M2 (structural editing) done; runnable demo at
-`npm/examples/editor.html` (`npm run demo`).** M3 (worker offload) is next.
+proven; M1 (rich in-block editing), M2 (structural editing), and M5 (formatting controls +
+ribbon + undo/redo) done; runnable demo with a ribbon at `npm/examples/editor.html`
+(`npm run demo`).** M3 (worker offload) and M4 (re-paginate-on-edit) are next.
 
 ## Architecture invariants (do not break)
 
@@ -72,11 +73,19 @@ place without reflowing).
 forward (staging originals are retained, so a scoped reflow is feasible); debounce.
 **Acceptance:** an edit that grows a block past a page boundary reflows to a new page.
 
-### M5 — Formatting toolbar + undo/redo  · effort S–M
-**Approach:** bold/italic/style/list controls → `ApplyFormat`/`SetParagraphStyle`/
-`SetListLevel`; Ctrl+Z/Y → `DocxSession.Undo/Redo` (+ re-render affected blocks). Mostly UI
-glue over existing ops.
-**Acceptance:** toolbar applies formatting to a selection; undo/redo round-trips an edit.
+### M5 — Formatting controls + ribbon + undo/redo  · effort S–M · ✅ **DONE**
+**Shipped:** `DocxEditor` command methods `format(key, value?)` (bold/italic/underline/
+strike/code on the selection span via `ApplyFormat`, toggling off computed state),
+`setParagraphStyle(styleId)` (via `SetParagraphStyle`), `undo()`/`redo()` (via
+`DocxSession.Undo/Redo` + full re-render), and `queryFormatState()` for button highlighting.
+Keyboard shortcuts Ctrl/Cmd+B/I/U and Ctrl+Z / Ctrl+Shift+Z (redo). The demo
+(`examples/editor.html`) has a ribbon (B/I/U/S/code, style dropdown, undo/redo) that
+preserves the editor selection via `mousedown`-preventDefault. Formatting routes through
+DocxSession (lossless, supports underline/color, not just markdown). **Note:** the editor
+now defaults to `fabricateClasses: false` (inline styles) so per-block re-renders stay
+self-contained — fabricated class names are per-conversion and have no page stylesheet.
+Test `editor.spec.ts` "M5" applies bold to a selection (survives save), sets Heading1
+(+1 h1), and undoes it; verified live in the browser.
 
 ### M6 — Tracked-changes / review mode  · effort M
 **Approach:** open the session with `TrackedChanges = RenderInline`; render `ins`/`del` with
