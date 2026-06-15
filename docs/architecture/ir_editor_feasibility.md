@@ -148,6 +148,17 @@ Findings / refinements vs the original design:
 
 ## 1b. Public API & usage
 
+**Run the demo** (a standalone in-browser editor over a sample doc):
+
+```bash
+cd npm
+npm run demo       # builds + serves; open http://localhost:8088/editor.html
+```
+
+Click a paragraph/heading to edit; Enter splits a block, Backspace at the start merges;
+toggle "Paginated" for page boxes; "Save .docx" downloads a lossless document. Source:
+`npm/examples/editor.html`.
+
 **Browser editor (npm).**
 
 ```ts

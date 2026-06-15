@@ -206,4 +206,78 @@ test.describe('DocxEditor — block editor end-to-end', () => {
     expect(out.markdown).toContain('*ITALWORD*');
     expect(out.markdown).toContain('[LINKWORD](https://example.com/x)');
   });
+
+  // M2: structural editing — Enter splits a paragraph, Backspace at start merges.
+  // Split a block (+1), then merge the halves back (-1, text restored), then save.
+  test('M2: split and merge blocks via keyboard', async ({ page }) => {
+    const bytes = readTestFile('HC031-Complicated-Document.docx');
+
+    const out = await page.evaluate(async (bytesArray: number[]) => {
+      const bin = new Uint8Array(bytesArray);
+      const D = (window as any).Docxodus;
+
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const editor = D.DocxEditor.open(container, bin, D, {});
+
+      const norm = (s: string) => (s || '').replace(/\s+/g, ' ').trim();
+      const alnum = (s: string) => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+      const editableEls = () =>
+        Array.from(container.querySelectorAll('p[data-anchor][contenteditable="true"]')) as HTMLElement[];
+      const count = () => editableEls().length;
+
+      const firstText = (el: HTMLElement): Text | null =>
+        document.createTreeWalker(el, NodeFilter.SHOW_TEXT).nextNode() as Text | null;
+      const setCaret = (el: HTMLElement, offset: number) => {
+        const tn = firstText(el);
+        const sel = window.getSelection()!;
+        const r = document.createRange();
+        if (tn) r.setStart(tn, Math.min(offset, tn.length));
+        else r.selectNodeContents(el);
+        r.collapse(true);
+        sel.removeAllRanges();
+        sel.addRange(r);
+      };
+      const press = (el: HTMLElement, key: string) =>
+        el.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
+
+      // Pick a block with enough text to split in the middle.
+      const target = editableEls().find((e) => norm(e.textContent || '').length > 12)!;
+      const originalText = norm(target.textContent || '');
+      const before = count();
+
+      // SPLIT at offset 6.
+      setCaret(target, 6);
+      press(target, 'Enter');
+      const afterSplit = count();
+
+      // MERGE the second half back into the first (Backspace at its start).
+      const halves = editableEls();
+      const firstHalf = halves.find((e) => alnum(originalText).startsWith(alnum(e.textContent || '')) && alnum(e.textContent || '').length > 0) || halves[0];
+      const secondHalf = firstHalf.nextElementSibling as HTMLElement;
+      setCaret(secondHalf, 0);
+      press(secondHalf, 'Backspace');
+      const afterMerge = count();
+      const mergedText = norm((firstHalf.isConnected ? firstHalf : editableEls()[0]).textContent || '');
+
+      const saved: Uint8Array = editor.save();
+      const reopened = D.DocxSessionBridge.OpenSession(saved, '');
+      const md = JSON.parse(D.DocxSessionBridge.Project(reopened)).markdown as string;
+      D.DocxSessionBridge.CloseSession(reopened);
+
+      editor.close();
+      container.remove();
+      return {
+        before, afterSplit, afterMerge,
+        originalAlnum: alnum(originalText),
+        mergedAlnum: alnum(mergedText),
+        mdLen: md.length,
+      };
+    }, Array.from(bytes));
+
+    expect(out.afterSplit).toBe(out.before + 1); // Enter split one block into two
+    expect(out.afterMerge).toBe(out.before); // Backspace merged them back
+    expect(out.mergedAlnum).toBe(out.originalAlnum); // text restored exactly
+    expect(out.mdLen).toBeGreaterThan(0); // valid doc after structural edits
+  });
 });

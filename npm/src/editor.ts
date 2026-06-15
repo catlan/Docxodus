@@ -26,6 +26,8 @@ export interface DocxEditorExports {
     CloseSession: (handle: number) => void;
     Project: (handle: number) => string;
     ReplaceText: (handle: number, anchor: string, md: string) => string;
+    SplitParagraph: (handle: number, anchor: string, offset: number) => string;
+    MergeParagraphs: (handle: number, first: string, second: string) => string;
     RenderBlockHtml: (
       handle: number,
       anchorId: string,
@@ -155,6 +157,67 @@ export function serializeInlineMarkdown(block: HTMLElement): string {
   return merged.map(segToMarkdown).join("").trim();
 }
 
+// ─── M2: structural editing (split / merge) ─────────────────────────────────
+
+interface AnchorRef {
+  id: string;
+  kind: string;
+  scope: string;
+  unid: string;
+}
+
+interface EditResultLite {
+  success: boolean;
+  created?: AnchorRef[];
+  removed?: AnchorRef[];
+  modified?: AnchorRef[];
+  error?: { message?: string };
+}
+
+/** Plain-text character offset of the collapsed caret within `block`, or null. */
+function caretOffsetIn(block: HTMLElement): number | null {
+  const sel = typeof window !== "undefined" ? window.getSelection() : null;
+  if (!sel || sel.rangeCount === 0) return null;
+  const range = sel.getRangeAt(0);
+  if (!block.contains(range.startContainer)) return null;
+  const pre = range.cloneRange();
+  pre.selectNodeContents(block);
+  pre.setEnd(range.startContainer, range.startOffset);
+  return pre.toString().length;
+}
+
+function placeCaretAtOffset(el: HTMLElement, offset: number): void {
+  const sel = typeof window !== "undefined" ? window.getSelection() : null;
+  if (!sel) return;
+  el.focus();
+  const range = document.createRange();
+  let remaining = offset;
+  let placed = false;
+  const walk = (node: Node): void => {
+    if (placed) return;
+    if (node.nodeType === 3 /* TEXT_NODE */) {
+      const len = node.textContent?.length ?? 0;
+      if (remaining <= len) {
+        range.setStart(node, remaining);
+        placed = true;
+      } else {
+        remaining -= len;
+      }
+    } else {
+      node.childNodes.forEach(walk);
+    }
+  };
+  walk(el);
+  if (!placed) {
+    range.selectNodeContents(el);
+    range.collapse(false);
+  } else {
+    range.collapse(true);
+  }
+  sel.removeAllRanges();
+  sel.addRange(range);
+}
+
 /** Build the full ConvertDocxToHtmlComplete arg list (stampAnchors = last arg). */
 function completeArgs(
   bytes: Uint8Array,
@@ -179,6 +242,8 @@ export class DocxEditor {
   private readonly options: Required<Omit<DocxEditorOptions, "onEdit">> & Pick<DocxEditorOptions, "onEdit">;
   /** Map a block's current bare unid → its full kind:scope:unid (DocxSession anchor). */
   private readonly unidToFullId = new Map<string, string>();
+  /** The element whose [data-anchor] descendants are the editable blocks (container or page container). */
+  private editRoot: HTMLElement;
   private closed = false;
 
   private constructor(
@@ -191,6 +256,7 @@ export class DocxEditor {
     this.exports = exports;
     this.handle = handle;
     this.options = options;
+    this.editRoot = container;
   }
 
   /** Open a document, render it into `container`, and wire up editing. */
@@ -261,6 +327,7 @@ export class DocxEditor {
       .map((s) => s.outerHTML)
       .join("");
     this.container.innerHTML = styles + parsed.body.innerHTML;
+    this.editRoot = this.container;
     if (this.options.editable) this.wireBlocks(this.container);
   }
 
@@ -271,6 +338,7 @@ export class DocxEditor {
     // so wire ONLY the visible page container — never the staging copies.
     const pageRoot =
       this.container.querySelector<HTMLElement>("#pagination-container") ?? this.container;
+    this.editRoot = pageRoot;
     if (this.options.editable) this.wireBlocks(pageRoot);
   }
 
@@ -288,6 +356,7 @@ export class DocxEditor {
     el.setAttribute("contenteditable", "true");
     el.dataset.committedText = el.textContent ?? "";
     el.addEventListener("blur", () => this.commitBlock(el));
+    el.addEventListener("keydown", (ev) => this.onKeydown(el, ev as KeyboardEvent));
   }
 
   /** Commit a block edit on blur: DocxSession op → re-render only this block → patch DOM. */
@@ -336,5 +405,124 @@ export class DocxEditor {
     }
 
     this.options.onEdit?.({ anchorId: newAnchor, unid: newUnid });
+  }
+
+  // ─── M2: structural editing ──────────────────────────────────────────
+
+  private onKeydown(el: HTMLElement, ev: KeyboardEvent): void {
+    if (this.closed) return;
+    if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing) {
+      ev.preventDefault();
+      this.splitAtCaret(el);
+    } else if (ev.key === "Backspace") {
+      const sel = typeof window !== "undefined" ? window.getSelection() : null;
+      if (sel && sel.isCollapsed && caretOffsetIn(el) === 0) {
+        const prev = this.previousEditable(el);
+        if (prev) {
+          ev.preventDefault();
+          this.mergeWithPrevious(prev, el);
+        }
+      }
+    }
+  }
+
+  /** Enter: split the block at the caret into two paragraphs. */
+  private splitAtCaret(el: HTMLElement): void {
+    const offset = caretOffsetIn(el);
+    const unid = el.getAttribute("data-anchor");
+    if (offset == null || !unid) return;
+    let fullId = this.unidToFullId.get(unid);
+    if (!fullId) return;
+
+    fullId = this.syncBlock(el, fullId); // flush any uncommitted typing first
+    const res = this.parseEdit(this.exports.DocxSessionBridge.SplitParagraph(this.handle, fullId, offset));
+    if (!res.success) return;
+    const first = res.modified?.[0];
+    const second = res.created?.[0];
+    if (!first || !second) return;
+
+    const firstEl = this.renderInto(first.id);
+    const secondEl = this.renderInto(second.id);
+    if (!firstEl || !secondEl) return;
+
+    el.replaceWith(firstEl);
+    firstEl.after(secondEl);
+    this.unidToFullId.delete(unid);
+    this.unidToFullId.set(first.unid, first.id);
+    this.unidToFullId.set(second.unid, second.id);
+    this.wireBlock(firstEl);
+    this.wireBlock(secondEl);
+    placeCaretAtOffset(secondEl, 0);
+    this.options.onEdit?.({ anchorId: second.id, unid: second.unid });
+  }
+
+  /** Backspace at block start: merge this block into the previous one. */
+  private mergeWithPrevious(prev: HTMLElement, el: HTMLElement): void {
+    const prevUnid = prev.getAttribute("data-anchor");
+    const thisUnid = el.getAttribute("data-anchor");
+    if (!prevUnid || !thisUnid) return;
+    let prevId = this.unidToFullId.get(prevUnid);
+    let thisId = this.unidToFullId.get(thisUnid);
+    if (!prevId || !thisId) return;
+
+    prevId = this.syncBlock(prev, prevId);
+    thisId = this.syncBlock(el, thisId);
+    const caret = (prev.textContent ?? "").length; // merge boundary
+
+    const res = this.parseEdit(this.exports.DocxSessionBridge.MergeParagraphs(this.handle, prevId, thisId));
+    if (!res.success) return;
+    const merged = res.modified?.[0];
+    if (!merged) return;
+
+    const mergedEl = this.renderInto(merged.id);
+    if (!mergedEl) return;
+
+    prev.replaceWith(mergedEl);
+    el.remove();
+    this.unidToFullId.delete(prevUnid);
+    this.unidToFullId.delete(thisUnid);
+    this.unidToFullId.set(merged.unid, merged.id);
+    this.wireBlock(mergedEl);
+    placeCaretAtOffset(mergedEl, caret);
+    this.options.onEdit?.({ anchorId: merged.id, unid: merged.unid });
+  }
+
+  /** Flush a block's current (uncommitted) text to the session; returns the live full id. */
+  private syncBlock(el: HTMLElement, fullId: string): string {
+    const cur = (el.textContent ?? "").trim();
+    if (cur === (el.dataset.committedText ?? "").trim()) return fullId; // unchanged
+    const res = this.parseEdit(
+      this.exports.DocxSessionBridge.ReplaceText(this.handle, fullId, serializeInlineMarkdown(el)),
+    );
+    return res.success ? res.modified?.[0]?.id ?? fullId : fullId;
+  }
+
+  /** Render a block by anchor and parse it into a detached element (null on error). */
+  private renderInto(anchorId: string): HTMLElement | null {
+    const html = this.exports.DocxSessionBridge.RenderBlockHtml(
+      this.handle,
+      anchorId,
+      this.options.cssPrefix,
+      this.options.fabricateClasses,
+    );
+    if (html.charCodeAt(0) === 0x7b /* error object */) return null;
+    return new DOMParser().parseFromString(html, "text/html").body.firstElementChild as HTMLElement | null;
+  }
+
+  /** The editable block immediately before `el` in document order, or null. */
+  private previousEditable(el: HTMLElement): HTMLElement | null {
+    const all = Array.from(
+      this.editRoot.querySelectorAll<HTMLElement>('[data-anchor][contenteditable="true"]'),
+    );
+    const i = all.indexOf(el);
+    return i > 0 ? all[i - 1] : null;
+  }
+
+  private parseEdit(json: string): EditResultLite {
+    try {
+      return JSON.parse(json) as EditResultLite;
+    } catch {
+      return { success: false };
+    }
   }
 }

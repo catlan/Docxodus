@@ -40,6 +40,8 @@
     "pretest": "cp tests/test-harness.html dist/wasm/ && cp tests/worker-test-harness.html dist/wasm/ && cp tests/profiling-harness.html dist/wasm/ && cp dist/pagination.bundle.js dist/wasm/ && cp dist/session.bundle.js dist/wasm/ && cp dist/editor.bundle.js dist/wasm/ && cp dist/docxodus.worker.js dist/wasm/ && cp dist/worker-proxy.bundle.js dist/wasm/worker-proxy.js",
     "test": "playwright test",
     "test:ui": "playwright test --ui",
+    "demo": "npm run build && npm run demo:serve",
+    "demo:serve": "cp dist/editor.bundle.js examples/editor.html dist/wasm/ && cp ../TestFiles/HC031-Complicated-Document.docx dist/wasm/sample.docx && echo '\\n>>> Open http://localhost:8088/editor.html\\n' && python3 -m http.server 8088 --directory dist/wasm",
     "prepublishOnly": "npm run build"
   },
   "repository": {

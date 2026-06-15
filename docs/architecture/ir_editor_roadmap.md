@@ -5,7 +5,8 @@ PoC results). This is the **sequenced, prioritized** plan for turning the proven
 foundation + MVP into a complete editor. Supersedes the scattered "Still Plan 2" notes.
 
 Status (branch `feat/ir-editor-feasibility-poc`, PR #234): **foundation + MVP shipped and
-proven; M1 (rich in-block editing) done.** M2 (structural editing) is next.
+proven; M1 (rich in-block editing) and M2 (structural editing) done; runnable demo at
+`npm/examples/editor.html` (`npm run demo`).** M3 (worker offload) is next.
 
 ## Architecture invariants (do not break)
 
@@ -43,15 +44,17 @@ markdown subset cannot express (size/color) is still dropped on an *edited* bloc
 pass can use finer-grained `ReplaceTextAtSpan`/`ApplyFormat`. **Applying** new formatting
 (toolbar) is M5.
 
-### M2 — Structural editing via keyboard  · effort M
-**Problem:** no way to add/split/merge/delete blocks from the UI; ops exist in `DocxSession`
-but aren't wired.
-**Approach:** Enter at a caret → `SplitParagraph(anchor, offset)`; Backspace at block start →
-`MergeParagraphs(prev, this)`; a block-insert affordance → `InsertParagraph`; delete-empty →
-`DeleteBlock`. Reconcile the DOM from `EditResult.Created/Removed/Modified` (patch the
-affected nodes, not a full re-render). Maintain the `unid → fullId` map across these deltas.
-**Acceptance:** browser test — split a paragraph, merge two, insert and delete a block; each
-reflected incrementally and surviving save/reopen.
+### M2 — Structural editing via keyboard  · effort M · ✅ **DONE**
+**Problem:** no way to add/split/merge blocks from the UI; ops existed in `DocxSession` but
+weren't wired.
+**Shipped:** Enter at the caret → `SplitParagraph(anchor, offset)` (offset from a Selection
+range); Backspace at block start → `MergeParagraphs(prev, this)`. A `keydown` handler on each
+block intercepts both, flushes any uncommitted typing first (`syncBlock`), applies the op,
+and reconciles the DOM from `EditResult.modified/created/removed` (re-render the affected
+block(s), insert/remove nodes, update the `unid → fullId` map, place the caret). Test
+`editor.spec.ts` "M2: split and merge" splits a block (+1), merges the halves back (−1, text
+restored exactly), and round-trips through save. Insert-at-doc-start and block delete/reorder
+remain follow-ups (Enter-split + Backspace-merge cover the core authoring loop).
 
 ### M3 — Worker offload  · effort M–L
 **Problem:** the initial full convert (~0.7–2.4 s) and session ops run on the main thread →
@@ -97,7 +100,7 @@ continuation for a block rendered in isolation.
 
 ## Recommended sequencing
 
-**M1 done** (edits preserve formatting). **M2 next** (structural editing — split/merge/
-insert via keyboard) completes "make editing real," then **M3** for responsiveness. M4–M9
-sequence by target use case: authoring favors M4/M5; review favors M6; broad fidelity favors
-M7/M9. M8 (React) any time.
+**M1 + M2 done** — "make editing real" is complete (edits preserve formatting; Enter/Backspace
+split/merge). A runnable demo exists (`npm run demo` → `editor.html`). **M3 next** (worker
+offload) for responsiveness on large docs. M4–M9 sequence by target use case: authoring favors
+M4/M5; review favors M6; broad fidelity favors M7/M9. M8 (React) any time.

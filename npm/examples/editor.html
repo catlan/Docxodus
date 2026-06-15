@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Docxodus — minimal block editor demo</title>
+  <style>
+    :root { color-scheme: light; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: -apple-system, Segoe UI, Roboto, sans-serif; background: #eceef1; color: #1c1e21; }
+    header { position: sticky; top: 0; z-index: 10; display: flex; gap: 12px; align-items: center;
+      flex-wrap: wrap; padding: 10px 16px; background: #fff; border-bottom: 1px solid #d7dade; }
+    header h1 { font-size: 15px; margin: 0 8px 0 0; font-weight: 600; }
+    header .spacer { flex: 1; }
+    button, label.btn { font: inherit; padding: 6px 12px; border: 1px solid #c3c7cc; border-radius: 6px;
+      background: #f6f7f8; cursor: pointer; }
+    button:hover, label.btn:hover { background: #eceef1; }
+    button:disabled { opacity: .5; cursor: default; }
+    #status { font-size: 12px; color: #65676b; }
+    label.toggle { font-size: 13px; display: inline-flex; gap: 5px; align-items: center; cursor: pointer; }
+    #editor { max-width: 920px; margin: 24px auto; padding: 0 16px 80px; }
+    /* Continuous mode: give blocks a page-like sheet. Paginated mode brings its own page boxes. */
+    #editor.continuous > * { background: #fff; }
+    #editor.continuous { background: #fff; padding: 56px 72px; border-radius: 4px;
+      box-shadow: 0 1px 4px rgba(0,0,0,.12); }
+    [contenteditable="true"]:focus { outline: 2px solid #4c8bf5; outline-offset: 2px; border-radius: 2px; }
+    [contenteditable="true"]:hover { background: #f3f8ff; }
+    .hint { max-width: 920px; margin: 0 auto; padding: 8px 16px; font-size: 12px; color: #65676b; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Docxodus editor</h1>
+    <label class="btn">Open .docx<input id="file" type="file" accept=".docx" hidden /></label>
+    <button id="save" disabled>Save .docx</button>
+    <label class="toggle"><input id="paginated" type="checkbox" /> Paginated (page boxes)</label>
+    <span class="spacer"></span>
+    <span id="status">Booting WASM…</span>
+  </header>
+  <p class="hint">
+    Click a paragraph or heading to edit it. <b>Enter</b> splits a block, <b>Backspace</b> at the start
+    merges with the previous one. Edits commit on blur and re-render only that block; bold/italic/links are
+    preserved. Tables and content inside them are read-only in this MVP. <b>Save</b> downloads a lossless .docx.
+  </p>
+  <div id="editor" class="continuous"></div>
+
+  <script src="./editor.bundle.js"></script>
+  <script type="module">
+    import { dotnet } from './_framework/dotnet.js';
+
+    const statusEl = document.getElementById('status');
+    const fileEl = document.getElementById('file');
+    const saveEl = document.getElementById('save');
+    const paginatedEl = document.getElementById('paginated');
+    const editorEl = document.getElementById('editor');
+
+    const setStatus = (s) => { statusEl.textContent = s; };
+
+    setStatus('Booting WASM…');
+    const { getAssemblyExports, getConfig } = await dotnet.withDiagnosticTracing(false).create();
+    const config = getConfig();
+    const wasm = await getAssemblyExports(config.mainAssemblyName);
+    const exports = {
+      DocxSessionBridge: wasm.DocxodusWasm.DocxSessionBridge,
+      DocumentConverter: wasm.DocxodusWasm.DocumentConverter,
+    };
+
+    let editor = null;
+    let currentBytes = null;
+
+    function openDoc(bytes) {
+      currentBytes = bytes;
+      if (editor) { try { editor.close(); } catch {} editor = null; }
+      const paginated = paginatedEl.checked;
+      editorEl.className = paginated ? 'paginated' : 'continuous';
+      editorEl.innerHTML = '';
+      const t0 = performance.now();
+      editor = window.DocxodusEditor.DocxEditor.open(editorEl, bytes, exports, { paginated });
+      saveEl.disabled = false;
+      setStatus(`Rendered in ${Math.round(performance.now() - t0)} ms — edit away.`);
+    }
+
+    fileEl.addEventListener('change', async (e) => {
+      const f = e.target.files?.[0];
+      if (!f) return;
+      setStatus(`Loading ${f.name}…`);
+      openDoc(new Uint8Array(await f.arrayBuffer()));
+    });
+
+    paginatedEl.addEventListener('change', () => { if (currentBytes) openDoc(currentBytes); });
+
+    saveEl.addEventListener('click', () => {
+      if (!editor) return;
+      const out = editor.save();
+      const blob = new Blob([out], {
+        type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'edited.docx';
+      a.click();
+      URL.revokeObjectURL(a.href);
+      setStatus('Saved edited.docx');
+    });
+
+    // Auto-load the bundled sample so there's something to edit immediately.
+    try {
+      const res = await fetch('./sample.docx');
+      if (res.ok) {
+        openDoc(new Uint8Array(await res.arrayBuffer()));
+      } else {
+        setStatus('Ready — open a .docx to start.');
+      }
+    } catch {
+      setStatus('Ready — open a .docx to start.');
+    }
+  </script>
+</body>
+</html>
