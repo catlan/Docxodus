@@ -32,6 +32,7 @@ export interface DocxEditorExports {
     SetParagraphStyle: (handle: number, anchor: string, styleId: string) => string;
     SetParagraphFormat: (handle: number, anchor: string, opJson: string) => string;
     ApplyListFormat: (handle: number, anchor: string, kind: string) => string;
+    SetListLevel: (handle: number, anchor: string, delta: number) => string;
     GetListMembership: (handle: number, anchor: string) => string;
     RenderBlockHtml: (
       handle: number,
@@ -184,6 +185,11 @@ interface EditResultLite {
   removed?: AnchorRef[];
   modified?: AnchorRef[];
   error?: { message?: string };
+}
+
+/** True if `block` renders as a list item (has a generated marker as its first child). */
+function isListBlock(block: HTMLElement): boolean {
+  return !!block.querySelector(":scope > [data-list-marker]");
 }
 
 /** True if `node` is, or is inside, a generated list-marker span (not editable content). */
@@ -567,6 +573,13 @@ export class DocxEditor {
       if (k === "z") { ev.preventDefault(); ev.shiftKey ? this.redo() : this.undo(); return; }
       if (k === "y") { ev.preventDefault(); this.redo(); return; }
     }
+    // Tab / Shift+Tab on a list item nests / un-nests it (changes list level).
+    if (ev.key === "Tab" && isListBlock(el)) {
+      ev.preventDefault();
+      this.activeBlock = el;
+      this.setListLevel(ev.shiftKey ? -1 : 1);
+      return;
+    }
     if (ev.key === "Enter" && !ev.shiftKey && !ev.isComposing) {
       ev.preventDefault();
       this.splitAtCaret(el);
@@ -742,9 +755,35 @@ export class DocxEditor {
     this.applyParagraphFormat({ alignment });
   }
 
-  /** Adjust the active block's left indent by `deltaTwips` (default ±720 = 0.5"), clamped at 0. */
+  /**
+   * Indent/outdent the active block. On a LIST item this changes the list NESTING LEVEL
+   * (`SetListLevel`) so numbering nests (e.g. 1, 2 → a sub-level) rather than the item just
+   * shifting sideways with flat numbering. On a plain paragraph it adjusts the left indent by
+   * `deltaTwips` (default ±720 = 0.5"), clamped at 0.
+   */
   indent(deltaTwips = 720): void {
+    if (this.activeBlock && isListBlock(this.activeBlock)) {
+      this.setListLevel(deltaTwips >= 0 ? 1 : -1);
+      return;
+    }
     this.applyParagraphFormat({ indentDelta: deltaTwips });
+  }
+
+  /** Change the active list item's nesting level by `delta` (+1 deeper, −1 shallower). */
+  private setListLevel(delta: number): void {
+    const block = this.activeBlock;
+    if (this.closed || !block) return;
+    const unid = block.getAttribute("data-anchor");
+    if (!unid) return;
+    let fullId = this.unidToFullId.get(unid);
+    if (!fullId) return;
+    const idx = this.blockIndex(block);
+    fullId = this.syncBlock(block, fullId);
+    const res = this.parseEdit(this.exports.DocxSessionBridge.SetListLevel(this.handle, fullId, delta));
+    if (!res.success) return;
+    // A level change ripples through the whole list's numbering — re-render with full document
+    // context (a single-block render can't compute nested numbering), keeping the caret in place.
+    this.remount(idx, false);
   }
 
   /** Toggle (or set) page-break-before on the active block. */

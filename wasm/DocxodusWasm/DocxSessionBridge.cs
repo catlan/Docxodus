@@ -53,7 +53,10 @@ public static partial class DocxSessionBridge
     public static string RenderBlockHtml(int h, string anchorId, string cssPrefix, bool fabricateClasses)
     {
         try { return DocxSessionOps.RenderBlockHtml(h, anchorId, cssPrefix, fabricateClasses); }
-        catch (System.Exception ex) { return JsonSerializer.Serialize(new { error = ex.Message }); }
+        // Reflection-free error JSON: the trimmed WASM build disables reflection-based
+        // JsonSerializer, so serializing an anonymous type here would itself throw
+        // (JsonSerializerIsReflectionDisabled) and mask the real failure as an uncaught crash.
+        catch (System.Exception ex) { return $"{{\"error\":\"{JsonEncodedText.Encode(ex.Message ?? string.Empty)}\"}}"; }
     }
 
     [JSExport]

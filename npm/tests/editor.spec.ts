@@ -626,4 +626,67 @@ test.describe('DocxEditor — block editor end-to-end', () => {
     expect(result.items[2].text).toBe('3. CC'); // typed into empty item 3
     expect(result.savedLen).toBeGreaterThan(0); // saves losslessly
   });
+
+  // Mlists4: Tab / Shift+Tab nests / un-nests a numbered item (changes list LEVEL via
+  // SetListLevel), so numbering nests (1, 2, [nested 1], 3) instead of staying flat. Regression:
+  // the editor's indent only changed the paragraph margin, so "nested lists" rendered flat.
+  test('Mlists4: Tab nests a numbered item (list level) and Shift+Tab un-nests it', async ({ page }) => {
+    const bytes = readTestFile('HC031-Complicated-Document.docx');
+
+    const out = await page.evaluate((bytesArray: number[]) => {
+      const bin = new Uint8Array(bytesArray);
+      const D = (window as any).Docxodus;
+      const norm = (s: string) => (s || '').replace(/\s+/g, ' ').trim();
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const editor = D.DocxEditor.open(container, bin, D, {});
+      const list = () => Array.from(container.querySelectorAll('p[data-anchor][contenteditable="true"]')) as HTMLElement[];
+      const isLi = (e: HTMLElement) => !!e.querySelector(':scope > [data-list-marker]');
+      const caretEnd = (el: HTMLElement) => {
+        el.focus();
+        const w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, {
+          acceptNode: (n: Node) => (n.parentElement && (n.parentElement as HTMLElement).closest('[data-list-marker]')) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
+        } as any);
+        let last: Node | null = null, n: Node | null;
+        while ((n = w.nextNode())) last = n;
+        const r = document.createRange();
+        if (last) { r.setStart(last, (last as Text).length); r.collapse(true); } else { r.selectNodeContents(el); r.collapse(false); }
+        const s = getSelection()!; s.removeAllRanges(); s.addRange(r);
+      };
+      // Build a 4-item numbered list.
+      caretEnd(list().find((e) => norm(e.textContent || '').length > 20)!);
+      editor.toggleList('decimal');
+      for (let i = 0; i < 3; i++) { const cur = document.activeElement as HTMLElement; caretEnd(cur); cur.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })); }
+
+      const liItems = () => list().filter(isLi);
+      const snapshot = () => liItems().slice(0, 4).map((e) => ({ num: norm(e.textContent || '').match(/^(\d+)\./)?.[1] ?? null, indentPx: parseFloat(getComputedStyle(e).marginLeft) }));
+
+      const flat = snapshot();
+      // Tab on item 3 to nest it one level deeper.
+      const it3 = liItems()[2];
+      it3.focus(); editor.activeBlock = it3;
+      it3.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }));
+      const nested = snapshot();
+      // Shift+Tab on the (still 3rd) item to outdent back to level 0.
+      const it3b = liItems()[2];
+      it3b.focus(); editor.activeBlock = it3b;
+      it3b.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true }));
+      const outdented = snapshot();
+      const savedLen = editor.save()?.length ?? 0;
+      editor.close(); container.remove();
+      return { flat, nested, outdented, savedLen };
+    }, Array.from(bytes));
+
+    // Flat list: 1,2,3,4 all at the same indent.
+    expect(out.flat.map((i) => i.num)).toEqual(['1', '2', '3', '4']);
+    // After nesting item 3: it is indented deeper than item 2 and its number restarts at the
+    // sub-level ("1"), while item 4 continues the outer level ("3").
+    expect(out.nested[2].indentPx).toBeGreaterThan(out.nested[1].indentPx);
+    expect(out.nested[2].num).toBe('1');
+    expect(out.nested[3].num).toBe('3');
+    // After Shift+Tab: back to a flat 1,2,3,4 at one indent.
+    expect(out.outdented.map((i) => i.num)).toEqual(['1', '2', '3', '4']);
+    expect(out.outdented[2].indentPx).toBe(out.outdented[1].indentPx);
+    expect(out.savedLen).toBeGreaterThan(0);
+  });
 });
