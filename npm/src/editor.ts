@@ -572,7 +572,9 @@ export class DocxEditor {
     // Generated list markers (number/bullet + suffix) are not editable content — keep the
     // caret out of them so offsets stay aligned with the paragraph's run text.
     el.querySelectorAll<HTMLElement>("[data-list-marker]").forEach((m) => m.setAttribute("contenteditable", "false"));
-    el.dataset.committedText = el.textContent ?? "";
+    // Baseline for the commit diff: CONTENT text (list markers + injected bidi marks excluded),
+    // matching the session's flat run-text offset space.
+    el.dataset.committedText = blockContentText(el);
     el.addEventListener("focus", () => { this.activeBlock = el; });
     el.addEventListener("blur", () => this.commitBlock(el));
     el.addEventListener("keydown", (ev) => this.onKeydown(el, ev as KeyboardEvent));
@@ -593,46 +595,42 @@ export class DocxEditor {
     }
   }
 
-  /** Commit a block edit on blur: DocxSession op → re-render only this block → patch DOM. */
+  /** Commit a block edit on blur: diff → run-preserving session op → re-render only this block. */
   private commitBlock(el: HTMLElement): void {
     if (this.closed || this.replacing) return;
     const unid = el.getAttribute("data-anchor");
     if (!unid) return;
-    const newText = (el.textContent ?? "").trim();
-    if (newText === (el.dataset.committedText ?? "").trim()) return; // no change
-
     const fullId = this.unidToFullId.get(unid);
     if (!fullId) return;
 
-    // M1: serialize the block's inline content to markdown so bold/italic/links survive
-    // the edit, instead of flattening to plain text.
-    const markdown = serializeInlineMarkdown(el);
-    const result = this.parseEdit(this.exports.DocxSessionBridge.ReplaceText(this.handle, fullId, markdown));
+    const result = this.commitTextChange(el, fullId);
+    if (!result) return; // no change
     if (!result.success) {
-      // Revert the DOM to the last committed text so the view stays in sync with truth.
-      el.textContent = el.dataset.committedText ?? "";
+      // Session unchanged — re-render this block from truth to discard the rejected DOM edit.
+      const fresh = this.renderInto(fullId);
+      if (fresh && el.isConnected) {
+        this.withReplaceGuard(() => el.replaceWith(fresh));
+        this.wireBlock(fresh);
+        if (this.activeBlock === el) this.activeBlock = fresh;
+      }
       return;
     }
 
     const newAnchor = result.modified?.[0]?.id ?? fullId;
     const newUnid = result.modified?.[0]?.unid ?? unid;
 
-    // List items: do NOT re-render on a text commit. A text edit never changes the item's number,
-    // and commit fires on blur — re-rendering replaces this block's DOM node *during* the blur,
-    // which cancels the browser's in-flight focus transfer when the user clicks straight to
-    // another bullet (focus falls to <body>, so typing into the next bullet does nothing). The
-    // DOM already shows exactly what the user typed, with the correct marker, so we leave it in
-    // place and only sync the session (done above) + bookkeeping. The marker would otherwise need
-    // whole-document context to renumber, which a single-block render lacks anyway.
+    // List items: do NOT re-render on a text commit. Re-rendering replaces the node *during* the
+    // blur, cancelling the browser's in-flight focus transfer when the user clicks straight to
+    // another bullet; numbering also needs whole-document context a single-block render lacks. The
+    // DOM already shows what the user typed with the correct marker — sync the baseline only.
     if (el.querySelector(":scope > [data-list-marker]")) {
-      el.dataset.committedText = el.textContent ?? "";
+      el.dataset.committedText = blockContentText(el);
       this.options.onEdit?.({ anchorId: newAnchor, unid: newUnid });
       return;
     }
 
-    // Plain block: re-render ONLY this block from the live session and patch it in place for
-    // canonical HTML. Swapping the just-blurred node here is safe (verified — focus stays on the
-    // newly-clicked block).
+    // Plain block: re-render ONLY this block from the live session for canonical HTML. Swapping the
+    // just-blurred node here is safe (verified — focus stays on the newly-clicked block).
     const html = this.exports.DocxSessionBridge.RenderBlockHtml(
       this.handle,
       newAnchor,
@@ -643,7 +641,6 @@ export class DocxEditor {
       const fresh = new DOMParser().parseFromString(html, "text/html").body.firstElementChild as HTMLElement | null;
       if (fresh && el.isConnected) {
         this.withReplaceGuard(() => el.replaceWith(fresh));
-        // Keep the anchor map current and re-wire the replacement.
         this.unidToFullId.delete(unid);
         this.unidToFullId.set(newUnid, newAnchor);
         this.wireBlock(fresh);
@@ -775,14 +772,70 @@ export class DocxEditor {
     this.options.onEdit?.({ anchorId: merged.id, unid: merged.unid });
   }
 
+  /**
+   * Apply the block's pending text change to the session with full inline-formatting fidelity.
+   * Diffs the committed content text (markers + bidi excluded) against the current content text
+   * and rewrites only the changed span via ReplaceTextAtSpan — every untouched run keeps its exact
+   * rPr, and typed text inherits the boundary run's formatting. Returns the parsed EditResult, or
+   * null when there is no change. Empty/whitespace-only baselines (e.g. the placeholder space the
+   * converter renders for an empty paragraph, whose DOM text doesn't line up with the session's
+   * empty run text) are rebuilt via ReplaceText — there is no inline formatting to preserve there.
+   */
+  private commitTextChange(el: HTMLElement, fullId: string): EditResultLite | null {
+    // `old` mirrors the session's flat run-text: strip bidi marks (blockContentText strips them,
+    // but wireBlock may have stored textContent before this Task 2 change, and the bidi test
+    // explicitly stores textContent). Using stripBidi keeps the baseline consistent with the
+    // session's offset space regardless of how committedText was stored.
+    const old = stripBidi(el.dataset.committedText ?? "");
+    const next = blockContentText(el);
+    if (old === next) return null;
+
+    if (old.trim().length === 0) {
+      return this.parseEdit(
+        this.exports.DocxSessionBridge.ReplaceText(this.handle, fullId, serializeInlineMarkdown(el)),
+      );
+    }
+
+    // If the DOM carries markdown-expressible formatting (bold/italic/links) that the span diff
+    // would lose (ReplaceTextAtSpan takes plain text), fall back to ReplaceText with the markdown
+    // serializer. This fires when the user injects <b>/<i>/<a> elements directly (e.g. via
+    // innerHTML), since serializeInlineMarkdown then produces markers not present in the plain text.
+    const md = serializeInlineMarkdown(el);
+    if (md !== next.trim()) {
+      return this.parseEdit(
+        this.exports.DocxSessionBridge.ReplaceText(this.handle, fullId, md),
+      );
+    }
+
+    const minLen = Math.min(old.length, next.length);
+    let p = 0;
+    while (p < minLen && old[p] === next[p]) p++;
+    let s = 0;
+    while (s < minLen - p && old[old.length - 1 - s] === next[next.length - 1 - s]) s++;
+
+    let start = p;
+    let len = old.length - p - s;
+    let middle = next.slice(p, next.length - s);
+
+    // A pure insertion is a zero-length span, which resolves to no runs and is rejected. Anchor a
+    // neighbor char so the span is non-empty and the inserted text inherits an adjacent run's rPr
+    // (the LEFT run when there is one, matching contenteditable; the first run at the very start).
+    if (len === 0) {
+      if (start > 0) { start -= 1; len = 1; middle = old[start] + middle; }
+      else { len = 1; middle = middle + old[0]; }
+    }
+
+    return this.parseEdit(
+      this.exports.DocxSessionBridge.ReplaceTextAtSpan(this.handle, fullId, start, len, middle),
+    );
+  }
+
   /** Flush a block's current (uncommitted) text to the session; returns the live full id. */
   private syncBlock(el: HTMLElement, fullId: string): string {
-    const cur = (el.textContent ?? "").trim();
-    if (cur === (el.dataset.committedText ?? "").trim()) return fullId; // unchanged
-    const res = this.parseEdit(
-      this.exports.DocxSessionBridge.ReplaceText(this.handle, fullId, serializeInlineMarkdown(el)),
-    );
-    return res.success ? res.modified?.[0]?.id ?? fullId : fullId;
+    const result = this.commitTextChange(el, fullId);
+    if (!result || !result.success) return fullId;
+    el.dataset.committedText = blockContentText(el);
+    return result.modified?.[0]?.id ?? fullId;
   }
 
   /** Render a block by anchor and parse it into a detached element (null on error). */

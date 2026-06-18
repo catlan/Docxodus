@@ -751,4 +751,72 @@ test.describe('DocxEditor — block editor end-to-end', () => {
     expect(out.blockCountAfter).toBe(out.blockCountBefore + 1);
     expect(out.newIsEmpty).toBe(true);
   });
+
+  // Regression: editing a block must preserve run formatting the markdown subset can't express
+  // (here, underline). The old commit path re-serialized to markdown (bold/italic/link only), so
+  // underline on an untouched run was dropped. The diff-based commit edits only the changed text
+  // span via ReplaceTextAtSpan, leaving every other run's rPr intact.
+  test('editing a block preserves underline on an untouched run', async ({ page }) => {
+    const bytes = readTestFile('HC031-Complicated-Document.docx');
+    const out = await page.evaluate(async (bytesArray: number[]) => {
+      const bin = new Uint8Array(bytesArray);
+      const D = (window as any).Docxodus;
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const editor = D.DocxEditor.open(container, bin, D, {});
+
+      const norm = (s: string) => (s || '').replace(/[‎‏]/g, '').replace(/\s+/g, ' ').trim();
+      const firstTextNode = (el: Node): Text | null => {
+        if (el.nodeType === 3) return el as Text;
+        for (const c of Array.from(el.childNodes)) { const r = firstTextNode(c); if (r) return r; }
+        return null;
+      };
+
+      const target = (Array.from(
+        container.querySelectorAll('p[data-anchor][contenteditable="true"]'),
+      ) as HTMLElement[]).find((e) => norm(e.textContent || '').length > 12)!;
+      const anchor = target.getAttribute('data-anchor')!;
+      const firstWord = norm(target.textContent || '').slice(0, 4);
+
+      // Underline the first 4 content chars via the ribbon path (ApplyFormat).
+      const tn = firstTextNode(target)!;
+      const raw = tn.textContent || '';
+      const lead = raw.length - raw.replace(/^[‎‏]+/, '').length;
+      target.focus();
+      let sel = window.getSelection()!;
+      let r = document.createRange();
+      r.setStart(tn, lead); r.setEnd(tn, lead + 4);
+      sel.removeAllRanges(); sel.addRange(r);
+      editor.format('underline');
+
+      // Type " ZZZ" at the very end of the (re-rendered) block, preserving its spans.
+      const blk = container.querySelector(`[data-anchor="${anchor}"]`) as HTMLElement;
+      blk.focus();
+      const r2 = document.createRange();
+      r2.selectNodeContents(blk); r2.collapse(false);
+      sel = window.getSelection()!; sel.removeAllRanges(); sel.addRange(r2);
+      document.execCommand('insertText', false, ' ZZZ');
+      blk.dispatchEvent(new Event('blur'));
+
+      // After commit, inspect the re-rendered block (rendered from the live session).
+      const after = container.querySelector(`[data-anchor="${anchor}"]`) as HTMLElement;
+      const underlinedSpan = (Array.from(after.querySelectorAll('span')) as HTMLElement[]).find(
+        (s) => getComputedStyle(s).textDecorationLine.includes('underline') && norm(s.textContent || '').includes(firstWord),
+      );
+      const savedLen = (editor.save() as Uint8Array).length;
+
+      editor.close();
+      container.remove();
+      return {
+        firstWord,
+        hasZZZ: norm(after.textContent || '').includes('ZZZ'),
+        underlinePreserved: !!underlinedSpan,
+        savedLen,
+      };
+    }, Array.from(bytes));
+
+    expect(out.hasZZZ).toBe(true);          // the text edit landed
+    expect(out.underlinePreserved).toBe(true); // underline on the untouched first word survived
+    expect(out.savedLen).toBeGreaterThan(0);
+  });
 });
