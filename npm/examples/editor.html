@@ -49,12 +49,15 @@
       <button data-cmd="code" title="Inline code">&lt;/&gt;</button>
       <button data-cmd="superscript" title="Superscript">x&#178;</button>
       <button data-cmd="subscript" title="Subscript">x&#8322;</button>
-      <select id="fontsize" title="Font size (points)">
-        <option value="">Size…</option>
+      <input id="fontsize" type="number" min="1" max="1638" step="0.5" list="fontsizes"
+             placeholder="Size" title="Font size (points) — type any value or pick a preset"
+             style="width:70px; font: inherit; padding:5px 6px; border:1px solid #c3c7cc; border-radius:6px; background:#f6f7f8;" />
+      <datalist id="fontsizes">
         <option>8</option><option>9</option><option>10</option><option>11</option>
         <option>12</option><option>14</option><option>16</option><option>18</option>
-        <option>20</option><option>24</option><option>28</option><option>36</option><option>48</option>
-      </select>
+        <option>20</option><option>24</option><option>28</option><option>36</option>
+        <option>48</option><option>72</option><option>96</option>
+      </datalist>
       <span class="sep"></span>
       <button data-align="left" title="Align left">L</button>
       <button data-align="center" title="Align center">C</button>
@@ -161,10 +164,22 @@
     });
     // Font size.
     const fontsizeEl = document.getElementById('fontsize');
-    fontsizeEl.addEventListener('mousedown', (e) => { /* keep selection */ });
-    fontsizeEl.addEventListener('change', () => {
-      if (editor && fontsizeEl.value) editor.setFontSize(parseFloat(fontsizeEl.value));
-      fontsizeEl.value = '';
+    const applyFontSize = () => {
+      const pts = parseFloat(fontsizeEl.value);
+      if (editor && pts > 0) editor.setFontSize(pts);
+    };
+    fontsizeEl.addEventListener('change', applyFontSize);
+    fontsizeEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); applyFontSize(); } });
+    // Reflect the current selection's size in the input (unless the user is editing the field).
+    document.addEventListener('selectionchange', () => {
+      if (!editor || document.activeElement === fontsizeEl) return;
+      const sel = document.getSelection();
+      const node = sel && sel.anchorNode;
+      const el = node ? (node.nodeType === 1 ? node : node.parentElement) : null;
+      if (el && el.closest && el.closest('#editor')) {
+        const px = parseFloat(getComputedStyle(el).fontSize);
+        if (px) fontsizeEl.value = String(Math.round(px * 0.75 * 2) / 2); // px → pt, nearest 0.5
+      }
     });
     // Horizontal rules + table insertion.
     for (const [id, fn] of [
