@@ -3538,6 +3538,17 @@ public sealed class DocxSession : IDisposable
         }
     }
 
+    // Cached formatting "shell" for session-attached single-block rendering (see
+    // Internal.HtmlConversionOps.RenderBlockHtml). A serialized throwaway .docx holding the
+    // formatting parts (styles/numbering/theme/fontTable/settings) + an empty body, built ONCE and
+    // reused across renders so a keystroke commit doesn't re-clone the (potentially huge) style
+    // gallery every time. HtmlConversionOps owns these; it rebuilds the shell when
+    // <see cref="RenderShellSignature"/> (a cheap content signature of the formatting parts) changes
+    // — i.e. when a format op adds a style / numbering level. Text edits never touch those parts, so
+    // the shell survives normal typing. Disposed implicitly with the session (plain GC).
+    internal byte[]? RenderShellBytes;
+    internal long RenderShellSignature;
+
     internal EditResult RawInsertXmlInternal(string anchorId, Position pos, string xml)
     {
         if (_disposed) return EditResult.Fail(EditErrorCode.SessionDisposed, "session disposed");

@@ -184,7 +184,18 @@ internal static class HtmlConversionOps
         if (blockElement is null)
             throw new ArgumentException($"anchor not found: {anchorId}", nameof(anchorId));
 
-        return RenderResolvedBlock(liveDoc, blockElement, options);
+        // Reuse a per-session formatting "shell" (the formatting parts + an empty body, serialized
+        // once) so a keystroke commit doesn't re-clone the source's whole style gallery every render
+        // — the dominant cost on a large gallery. The shell is rebuilt only when the formatting parts
+        // actually change (signature), which only happens on a format op (add style / numbering /
+        // level), never on a text edit, so it survives normal typing.
+        long sig = ComputeFormattingSignature(liveDoc);
+        if (session.RenderShellBytes is null || session.RenderShellSignature != sig)
+        {
+            session.RenderShellBytes = BuildShellDocBytes(liveDoc);
+            session.RenderShellSignature = sig;
+        }
+        return RenderBlockFromShell(session.RenderShellBytes, blockElement, options);
     }
 
     /// <summary>Session-attached render for a registered session handle.</summary>
@@ -214,7 +225,9 @@ internal static class HtmlConversionOps
     /// <summary>
     /// Render one resolved block element to HTML via a throwaway document that copies the
     /// source's formatting parts. Read-only w.r.t. <paramref name="sourceDoc"/> (the block is
-    /// cloned, parts are read), so it is safe to call on a live session document.
+    /// cloned, parts are read), so it is safe to call on a live session document. This is the
+    /// STATELESS path (no per-session shell cache); the session-attached overload reuses a cached
+    /// shell via <see cref="RenderBlockFromShell"/>.
     /// </summary>
     private static string RenderResolvedBlock(WordprocessingDocument sourceDoc, XElement blockElement,
         HtmlConversionOptions options)
@@ -227,39 +240,128 @@ internal static class HtmlConversionOps
                    blockStream, DocumentFormat.OpenXml.WordprocessingDocumentType.Document))
         {
             var main = blockDoc.AddMainDocumentPart();
-            CopyPartXml(sourceDoc, blockDoc, p => p.StyleDefinitionsPart);
-            CopyPartXml(sourceDoc, blockDoc, p => p.StylesWithEffectsPart);
-            CopyPartXml(sourceDoc, blockDoc, p => p.NumberingDefinitionsPart);
-            CopyPartXml(sourceDoc, blockDoc, p => p.ThemePart);
-            CopyPartXml(sourceDoc, blockDoc, p => p.FontTablePart);
-            CopyPartXml(sourceDoc, blockDoc, p => p.DocumentSettingsPart);
-            // The converter requires a DocumentSettingsPart (CalculateSpanWidthForTabs
-            // reads w:defaultTabStop with no null check). Ensure one exists.
-            if (blockDoc.MainDocumentPart!.DocumentSettingsPart is null)
-            {
-                blockDoc.MainDocumentPart.AddNewPart<DocumentSettingsPart>()
-                    .PutXDocument(new XDocument(
-                        new XElement(W.settings, new XAttribute(XNamespace.Xmlns + "w", W.w))));
-            }
-            main.PutXDocument(new XDocument(
-                new XElement(W.document,
-                    new XAttribute(XNamespace.Xmlns + "w", W.w),
-                    new XAttribute(XNamespace.Xmlns + "r", R.r),
-                    new XElement(W.body, new XElement(blockElement)))));
+            AddFormattingParts(blockDoc, sourceDoc);
+            main.PutXDocument(BuildBodyDocument(new XElement(blockElement)));
         }
         blockStream.Position = 0;
         using var renderDoc = WordprocessingDocument.Open(blockStream, true);
+        var htmlElement = WmlToHtmlConverter.ConvertToHtml(renderDoc, BuildBlockConverterSettings(options));
+        return ExtractBlockHtml(htmlElement, unid);
+    }
 
-        var settings = new WmlToHtmlConverterSettings
+    /// <summary>
+    /// Build the reusable per-session "shell": a serialized throwaway .docx holding the copied
+    /// formatting parts and an EMPTY body. Built once (per formatting signature) and cached on the
+    /// session; <see cref="RenderBlockFromShell"/> drops the block into its body per render. This
+    /// front-loads the (expensive on a large style gallery) part clone+serialize so it is paid once
+    /// rather than every keystroke commit.
+    /// </summary>
+    private static byte[] BuildShellDocBytes(WordprocessingDocument sourceDoc)
+    {
+        using var shellStream = new MemoryStream();
+        using (var shellDoc = WordprocessingDocument.Create(
+                   shellStream, DocumentFormat.OpenXml.WordprocessingDocumentType.Document))
+        {
+            var main = shellDoc.AddMainDocumentPart();
+            AddFormattingParts(shellDoc, sourceDoc);
+            main.PutXDocument(BuildBodyDocument(/* empty body */));
+        }
+        return shellStream.ToArray();
+    }
+
+    /// <summary>
+    /// Render one block from a cached shell: open a fresh copy of <paramref name="shellBytes"/>
+    /// (so the converter's in-place mutation never touches the cache), drop the cloned block into
+    /// the empty body, convert, and extract the block's HTML. Output is identical to
+    /// <see cref="RenderResolvedBlock"/> for the same block + parts.
+    /// </summary>
+    private static string RenderBlockFromShell(byte[] shellBytes, XElement blockElement,
+        HtmlConversionOptions options)
+    {
+        var unid = (string?)blockElement.Attribute(PtOpenXml.Unid);
+        using var ms = new MemoryStream();
+        ms.Write(shellBytes, 0, shellBytes.Length);
+        ms.Position = 0;
+        using var renderDoc = WordprocessingDocument.Open(ms, true);
+        var bodyEl = renderDoc.MainDocumentPart!.GetXDocument().Root!.Element(W.body)!;
+        bodyEl.RemoveNodes();
+        bodyEl.Add(new XElement(blockElement));
+        var htmlElement = WmlToHtmlConverter.ConvertToHtml(renderDoc, BuildBlockConverterSettings(options));
+        return ExtractBlockHtml(htmlElement, unid);
+    }
+
+    /// <summary>
+    /// Cheap content signature of the formatting parts that affect a block render. It changes when a
+    /// format op adds a style / numbering / level (the only mid-session formatting-part mutations —
+    /// see DocxSession's StyleFactory / NumberingFactory call sites); text edits never touch these
+    /// parts. Computed from the already-parsed (cached) XDocuments, so it is ~microseconds and
+    /// reflects in-memory mutations regardless of stream flush. NOTE: the edit API never mutates the
+    /// theme / fontTable / settings parts, so they are not part of the signature; if that ever
+    /// changes, add them here (or the cached shell could go stale).
+    /// </summary>
+    private static long ComputeFormattingSignature(WordprocessingDocument doc)
+    {
+        XNamespace w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+        var main = doc.MainDocumentPart;
+        if (main is null) return 0;
+        long sig = 17;
+        void Mix(long v) => sig = unchecked(sig * 1000003 + v);
+
+        var styles = main.StyleDefinitionsPart?.GetXDocument().Root;
+        Mix(styles?.Elements(w + "style").Count() ?? -1);
+        var swe = main.StylesWithEffectsPart?.GetXDocument().Root;
+        Mix(swe?.Elements(w + "style").Count() ?? -1);
+        var num = main.NumberingDefinitionsPart?.GetXDocument().Root;
+        Mix(num?.Elements(w + "num").Count() ?? -1);
+        Mix(num?.Elements(w + "abstractNum").Count() ?? -1);
+        Mix(num?.Descendants(w + "lvl").Count() ?? -1);
+        return sig;
+    }
+
+    /// <summary>Copy the formatting parts (styles/numbering/theme/font/settings) from src into the
+    /// throwaway doc, ensuring a DocumentSettingsPart exists (the converter reads w:defaultTabStop
+    /// with no null check).</summary>
+    private static void AddFormattingParts(WordprocessingDocument blockDoc, WordprocessingDocument sourceDoc)
+    {
+        CopyPartXml(sourceDoc, blockDoc, p => p.StyleDefinitionsPart);
+        CopyPartXml(sourceDoc, blockDoc, p => p.StylesWithEffectsPart);
+        CopyPartXml(sourceDoc, blockDoc, p => p.NumberingDefinitionsPart);
+        CopyPartXml(sourceDoc, blockDoc, p => p.ThemePart);
+        CopyPartXml(sourceDoc, blockDoc, p => p.FontTablePart);
+        CopyPartXml(sourceDoc, blockDoc, p => p.DocumentSettingsPart);
+        if (blockDoc.MainDocumentPart!.DocumentSettingsPart is null)
+        {
+            blockDoc.MainDocumentPart.AddNewPart<DocumentSettingsPart>()
+                .PutXDocument(new XDocument(
+                    new XElement(W.settings, new XAttribute(XNamespace.Xmlns + "w", W.w))));
+        }
+    }
+
+    /// <summary>A minimal <c>w:document</c> wrapping <paramref name="bodyContent"/> (or an empty body).</summary>
+    private static XDocument BuildBodyDocument(params object[] bodyContent) =>
+        new XDocument(
+            new XElement(W.document,
+                new XAttribute(XNamespace.Xmlns + "w", W.w),
+                new XAttribute(XNamespace.Xmlns + "r", R.r),
+                new XElement(W.body, bodyContent)));
+
+    private static WmlToHtmlConverterSettings BuildBlockConverterSettings(HtmlConversionOptions options) =>
+        new WmlToHtmlConverterSettings
         {
             FabricateCssClasses = options.FabricateCssClasses,
             CssClassPrefix = options.CssClassPrefix,
             StampAnchors = true,
+            // The throwaway doc copies the source's (possibly huge) style gallery verbatim;
+            // re-simplifying it every render is the dominant single-block cost (~70ms on a 160-style
+            // python-docx doc) and only strips rsids, which never reach the HTML. Skip it — the
+            // resolved formatting, and thus the rendered block, are identical to the full render.
+            SkipFormattingPartsSimplification = true,
         };
-        var htmlElement = WmlToHtmlConverter.ConvertToHtml(renderDoc, settings);
 
-        // Return the rendered block element (located by its stamped data-anchor),
-        // not the full <html> wrapper.
+    /// <summary>Extract the rendered block (located by its stamped data-anchor) from the full
+    /// converter output, not the <c>&lt;html&gt;</c> wrapper.</summary>
+    private static string ExtractBlockHtml(XElement htmlElement, string? unid)
+    {
         XElement? inner = null;
         if (unid != null)
             inner = htmlElement.Descendants().FirstOrDefault(e => (string?)e.Attribute("data-anchor") == unid);

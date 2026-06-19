@@ -273,6 +273,18 @@ namespace Docxodus
         /// </summary>
         public bool StampAnchors;
 
+        /// <summary>
+        /// Skip MarkupSimplifier's pass over the style-definition parts (styles + stylesWithEffects).
+        /// That pass only strips rendering-irrelevant metadata (rsids; styles carry no body runs /
+        /// bookmarks / proof errors to remove or merge), so it cannot change the resolved formatting
+        /// or the emitted HTML — but on a large style gallery (e.g. python-docx's ~160-style template)
+        /// it is the dominant cost of a single-block render (~70ms of ~73ms). The incremental
+        /// per-block render (<see cref="Internal.HtmlConversionOps.RenderBlockHtml"/>) sets this so a
+        /// keystroke commit doesn't re-walk the whole 400KB+ styles part every time. Internal-only;
+        /// the full-document render leaves it false, so its output is unchanged. Default: false.
+        /// </summary>
+        internal bool SkipFormattingPartsSimplification;
+
         public WmlToHtmlConverterSettings()
         {
             PageTitle = "";
@@ -865,6 +877,7 @@ namespace Docxodus
                 RemoveSoftHyphens = true,
                 RemoveGoBackBookmark = true,
                 ReplaceTabsWithSpaces = false,
+                SkipFormattingPartsSimplification = htmlConverterSettings.SkipFormattingPartsSimplification,
             };
             MarkupSimplifier.SimplifyMarkup(wordDoc, simplifyMarkupSettings);
 
@@ -6372,13 +6385,17 @@ namespace Docxodus
                     BorderOverride(border1, border2);
             }
 
-            if ((decimal)border1.Attribute(W.sz) > (decimal)border2.Attribute(W.sz))
+            // w:sz is OPTIONAL on a border and absent on w:val="none" borders (e.g. a borderless
+            // layout table). Only "nil" is guarded above, so a "none" border reaches here; read sz
+            // null-safe (missing = 0 width) rather than (decimal)Attribute(...), which throws
+            // ArgumentNullException on the missing attribute and aborts the whole conversion.
+            if (((decimal?)border1.Attribute(W.sz) ?? 0) > ((decimal?)border2.Attribute(W.sz) ?? 0))
             {
                 BorderOverride(border1, border2);
                 return;
             }
 
-            if ((decimal)border1.Attribute(W.sz) < (decimal)border2.Attribute(W.sz))
+            if (((decimal?)border1.Attribute(W.sz) ?? 0) < ((decimal?)border2.Attribute(W.sz) ?? 0))
             {
                 BorderOverride(border2, border1);
                 return;

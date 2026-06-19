@@ -4,6 +4,7 @@ using System.Linq;
 using DocumentFormat.OpenXml.Packaging;
 using Docxodus;
 using Docxodus.Internal;
+using Wp = DocumentFormat.OpenXml.Wordprocessing;
 using Xunit;
 
 namespace Docxodus.Tests;
@@ -191,5 +192,124 @@ public class HtmlConversionOpsTests
         // Unid assignment). Generous margin keeps the assertion robust to CI noise.
         Assert.True(sessionMs <= statelessMs * 1.25,
             $"session-attached slower than stateless: stateless={statelessMs:F2} session={sessionMs:F2}");
+    }
+
+    // The single-block render path sets SkipFormattingPartsSimplification=true to avoid re-walking
+    // the (potentially huge) style gallery on every keystroke commit. That pass only strips
+    // rendering-irrelevant rsids from the style parts, so it MUST be byte-for-byte rendering-neutral.
+    // Prove it directly: a full-document convert with the flag on vs off produces identical HTML
+    // (covers CSS classes + theme fonts + list markers, not just tag+text like HCO050).
+    [Theory]
+    [InlineData("HC031-Complicated-Document.docx", false)]
+    [InlineData("HC001-5DayTourPlanTemplate.docx", false)]
+    [InlineData("HC031-Complicated-Document.docx", true)]
+    public void HCO053_SkipFormattingPartsSimplification_IsRenderingNeutral(string fileName, bool paginated)
+    {
+        byte[] bytes = File.ReadAllBytes(Path.Combine("..", "..", "..", "..", "TestFiles", fileName));
+        string Render(bool skip)
+        {
+            using var ms = new MemoryStream();
+            ms.Write(bytes, 0, bytes.Length);
+            ms.Position = 0;
+            using var doc = WordprocessingDocument.Open(ms, true);
+            var settings = new WmlToHtmlConverterSettings
+            {
+                FabricateCssClasses = false,
+                StampAnchors = true,
+                RenderPagination = paginated ? PaginationMode.Paginated : PaginationMode.None,
+                SkipFormattingPartsSimplification = skip,
+            };
+            return WmlToHtmlConverter.ConvertToHtml(doc, settings)
+                .ToString(System.Xml.Linq.SaveOptions.DisableFormatting);
+        }
+
+        Assert.Equal(Render(false), Render(true));
+    }
+
+    // The session-attached render path reuses a cached formatting "shell" across calls. Prove it is
+    // (a) consistent across calls (cache reuse doesn't drift) and (b) byte-identical to the stateless
+    // path (which HCO050 already ties to the full-render oracle).
+    [Fact]
+    public void HCO054_SessionShellRender_ConsistentAndMatchesStateless()
+    {
+        byte[] bytes = File.ReadAllBytes(Path.Combine("..", "..", "..", "..", "TestFiles",
+            "HC031-Complicated-Document.docx"));
+        using var session = new DocxSession(bytes);
+        var opts = new HtmlConversionOptions { FabricateCssClasses = false, CssClassPrefix = "pt-" };
+        var anchors = session.Project().AnchorIndex.Keys
+            .Where(k => k.StartsWith("p:") || k.StartsWith("h:") || k.StartsWith("li:"))
+            .Take(12).ToList();
+        Assert.NotEmpty(anchors);
+
+        int verified = 0;
+        foreach (var a in anchors)
+        {
+            string first = HtmlConversionOps.RenderBlockHtml(session, a, opts);   // builds the shell
+            string second = HtmlConversionOps.RenderBlockHtml(session, a, opts);  // reuses the shell
+            Assert.Equal(first, second);
+            string stateless = HtmlConversionOps.RenderBlockHtml(bytes, a, opts); // independent path
+            Assert.Equal(stateless, first);
+            verified++;
+        }
+        Assert.True(verified > 0);
+    }
+
+    // A mid-session format op (ApplyListFormat) mutates the numbering part, so the cached shell MUST
+    // be rebuilt (signature change) — otherwise the freshly-list-ified paragraph would render WITHOUT
+    // its marker against a stale (numbering-less) shell. Also covers the no-list -> list transition.
+    [Fact]
+    public void HCO055_SessionShellRender_RebuildsAfterFormattingMutation()
+    {
+        byte[] bytes = File.ReadAllBytes(Path.Combine("..", "..", "..", "..", "TestFiles",
+            "HC031-Complicated-Document.docx"));
+        using var session = new DocxSession(bytes);
+        var opts = new HtmlConversionOptions { FabricateCssClasses = false, CssClassPrefix = "pt-" };
+
+        var plain = session.Project().AnchorIndex
+            .First(kv => kv.Key.StartsWith("p:") && kv.Value.TextPreview.Trim().Length > 3);
+
+        // Prime the shell (no marker yet).
+        string before = HtmlConversionOps.RenderBlockHtml(session, plain.Key, opts);
+        Assert.DoesNotContain("data-list-marker", before);
+
+        // Mutate the numbering part; the next render must rebuild the shell and show the marker.
+        var r = session.ApplyListFormat(plain.Key, ListFormat.Bullet);
+        Assert.True(r.Success, r.Error?.Message);
+        string after = HtmlConversionOps.RenderBlockHtml(session, r.Modified[0].Id, opts);
+        Assert.Contains("data-list-marker", after);
+    }
+
+    // A borderless layout table (w:tblBorders all w:val="none", with NO w:sz) — the standard way real
+    // S-1 covers lay out multi-column rows — used to CRASH the whole conversion: both
+    // FormattingAssembler.ResolveInsideBorder and WmlToHtmlConverter.ResolveCellBorder cast the
+    // absent w:sz to a value type (only "nil" was special-cased; "none" fell through). It must render.
+    [Fact]
+    public void HCO056_BorderlessTable_DoesNotCrashConverter()
+    {
+        using var ms = new MemoryStream();
+        using (var doc = WordprocessingDocument.Create(ms, DocumentFormat.OpenXml.WordprocessingDocumentType.Document))
+        {
+            var main = doc.AddMainDocumentPart();
+            main.Document = new Wp.Document(new Wp.Body());
+            main.AddNewPart<StyleDefinitionsPart>().Styles = new Wp.Styles();
+            main.AddNewPart<DocumentSettingsPart>().Settings = new Wp.Settings();
+            var noneBorders = new Wp.TableBorders(
+                new Wp.TopBorder { Val = Wp.BorderValues.None },
+                new Wp.LeftBorder { Val = Wp.BorderValues.None },
+                new Wp.BottomBorder { Val = Wp.BorderValues.None },
+                new Wp.RightBorder { Val = Wp.BorderValues.None },
+                new Wp.InsideHorizontalBorder { Val = Wp.BorderValues.None },
+                new Wp.InsideVerticalBorder { Val = Wp.BorderValues.None });
+            main.Document.Body!.Append(new Wp.Table(
+                new Wp.TableProperties(noneBorders),
+                new Wp.TableRow(
+                    new Wp.TableCell(new Wp.Paragraph(new Wp.Run(new Wp.Text("LeftCellText")))),
+                    new Wp.TableCell(new Wp.Paragraph(new Wp.Run(new Wp.Text("RightCellText")))))));
+            main.Document.Save();
+        }
+
+        string html = HtmlConversionOps.ConvertToHtml(ms.ToArray(), new HtmlConversionOptions());
+        Assert.Contains("LeftCellText", html);
+        Assert.Contains("RightCellText", html);
     }
 }
