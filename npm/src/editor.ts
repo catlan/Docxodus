@@ -474,6 +474,15 @@ export class DocxEditor {
    */
   private replacing = false;
 
+  /**
+   * The last real (non-collapsed) text selection inside an editable block. A toolbar control that
+   * must take focus to be used — the font-size combobox — blurs the block and collapses the live
+   * selection, so without this an operation triggered from such a control could only target the
+   * whole paragraph (S-1 smoke-test finding 3). Refreshed whenever a non-empty selection sits in a
+   * block, and cleared when a caret is collapsed inside a block (so it never goes stale).
+   */
+  private lastSelection: { unid: string; span: { start: number; length: number } } | null = null;
+
   private constructor(
     container: HTMLElement,
     exports: DocxEditorExports,
@@ -485,6 +494,34 @@ export class DocxEditor {
     this.handle = handle;
     this.options = options;
     this.editRoot = container;
+    if (typeof document !== "undefined")
+      document.addEventListener("selectionchange", this.onSelectionChange);
+  }
+
+  /** Track the last meaningful selection so focus-stealing toolbar controls can still target it. */
+  private readonly onSelectionChange = (): void => {
+    if (this.closed) return;
+    const sel = typeof window !== "undefined" ? window.getSelection() : null;
+    if (!sel || sel.rangeCount === 0) return; // no selection info — keep the cache as-is
+    const range = sel.getRangeAt(0);
+    const block = this.editableBlockOf(range.commonAncestorContainer);
+    if (!block) return; // selection is outside the editor (e.g. a toolbar field) — keep the cache
+    const unid = block.getAttribute("data-anchor");
+    if (!unid) return;
+    if (range.collapsed) {
+      this.lastSelection = null; // an explicit caret in a block — drop any stale selection
+      return;
+    }
+    const span = selectionSpanIn(block);
+    if (span) this.lastSelection = { unid, span };
+  };
+
+  /** The editable block (contenteditable [data-anchor]) containing `node`, if any, within this editor. */
+  private editableBlockOf(node: Node | null): HTMLElement | null {
+    if (!node) return null;
+    const start = node.nodeType === 1 ? (node as HTMLElement) : node.parentElement;
+    const block = start?.closest<HTMLElement>('[data-anchor][contenteditable="true"]') ?? null;
+    return block && this.editRoot.contains(block) ? block : null;
   }
 
   /** Open a document, render it into `container`, and wire up editing. */
@@ -540,6 +577,8 @@ export class DocxEditor {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    if (typeof document !== "undefined")
+      document.removeEventListener("selectionchange", this.onSelectionChange);
     this.exports.DocxSessionBridge.CloseSession(this.handle);
   }
 
@@ -1089,7 +1128,10 @@ export class DocxEditor {
     if (!unid) return;
     let fullId = this.unidToFullId.get(unid);
     if (!fullId) return;
-    const span = selectionSpanIn(block);
+    // Use the live selection; if the font-size combobox stole focus and collapsed it, fall back to
+    // the last real selection cached for this block so a sub-range still sizes (finding 3).
+    let span = selectionSpanIn(block);
+    if (!span && this.lastSelection && this.lastSelection.unid === unid) span = this.lastSelection.span;
     fullId = this.syncBlock(block, fullId);
     const res = this.parseEdit(
       this.exports.DocxSessionBridge.ApplyFormat(
