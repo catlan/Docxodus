@@ -128,10 +128,18 @@ nuance: per-item numbering *continuation* for a block rendered in isolation is w
 author colors; serve the redline/review use case.
 **Acceptance:** edits land as `w:ins`/`w:del` with author attribution, visible in the editor.
 
-### M7 — Table-cell & table-structure editing  · effort M
-**Approach:** `ReplaceCellContent` for cell text; row/col insert-delete and cell-merge via
-`session.Raw.*` until first-class ops exist.
-**Acceptance:** a cell's content edits and round-trips; tables are no longer read-only.
+### M7 — Table-cell & table-structure editing  · effort M · ✅ **DONE** (except cell-merge)
+**Shipped (resolving the S-1 smoke-test gaps):** cell text edits/round-trips; **Enter inside a
+cell** splits the cell paragraph in place (stacked lines — value over label, multi-line
+addresses); first-class row/column ops `DocxSession.{InsertTableRow,InsertTableColumn,
+DeleteTableRow,DeleteTableColumn}` (by a cell-paragraph anchor; deleting the last row/col removes
+the table) surfaced through the bridge + `DocxEditor` + a floating table toolbar; per-column
+`TableInsertOptions.ColumnWidths`; a visual table grid picker in the demo. v1 assumes a
+rectangular grid (no `w:gridSpan`). Tests: C# `DocxSessionTableEditTests` DT201–DT207 +
+`DocxSessionS1FeaturesTests` DS214/DS215; browser `editor-cell-multiparagraph` /
+`editor-table-edit` / `editor-table-colwidths` / `editor-demo-grid`.
+**Remaining:** horizontal/vertical **cell merge** (`w:gridSpan`/`w:vMerge`) and drag-to-resize
+columns — still via `session.Raw.*` for now.
 
 ### M8 — React wrapper  · effort S
 **Approach:** `useDocxEditor` hook + `<DocxEditor>` component over the pure-TS core, in
