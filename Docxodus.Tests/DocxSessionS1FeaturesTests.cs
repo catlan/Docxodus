@@ -147,6 +147,47 @@ public class DocxSessionS1FeaturesTests
     }
 
     [Fact]
+    public void DS214_InsertTable_ColumnWidths_LandInGridAndCells()
+    {
+        using var session = new DocxSession(DocxSessionTests.BuildDS001_SimpleTwoParagraphs());
+        var anchor = FirstBodyParagraph(session);
+
+        // A wide-left / narrow-right 2-column split (the S-1 filing-header row).
+        var r = session.InsertTable(anchor, Position.After, 1, 2, new TableInsertOptions
+        {
+            Borderless = true,
+            ColumnWidths = new[] { 7000, 2576 },
+        });
+        Assert.True(r.Success, r.Error?.Message);
+
+        var tbl = DocumentXml(session.Save()).Descendants(W + "tbl").Single();
+
+        // w:tblGrid carries the explicit column widths in order.
+        var gridCols = tbl.Element(W + "tblGrid")!.Elements(W + "gridCol").ToList();
+        Assert.Equal(2, gridCols.Count);
+        Assert.Equal("7000", (string?)gridCols[0].Attribute(W + "w"));
+        Assert.Equal("2576", (string?)gridCols[1].Attribute(W + "w"));
+
+        // Each cell's w:tcW matches its column.
+        var cells = tbl.Element(W + "tr")!.Elements(W + "tc").ToList();
+        Assert.Equal("7000", (string?)cells[0].Element(W + "tcPr")?.Element(W + "tcW")?.Attribute(W + "w"));
+        Assert.Equal("2576", (string?)cells[1].Element(W + "tcPr")?.Element(W + "tcW")?.Attribute(W + "w"));
+    }
+
+    [Fact]
+    public void DS215_InsertTable_ColumnWidths_WrongCount_IsRejected()
+    {
+        using var session = new DocxSession(DocxSessionTests.BuildDS001_SimpleTwoParagraphs());
+        var anchor = FirstBodyParagraph(session);
+        // 3 widths for a 2-column table is a caller error — fail loudly, don't silently equalize.
+        var r = session.InsertTable(anchor, Position.After, 1, 2, new TableInsertOptions
+        {
+            ColumnWidths = new[] { 1000, 2000, 3000 },
+        });
+        Assert.False(r.Success);
+    }
+
+    [Fact]
     public void DS206_InsertTable_BorderedByDefault()
     {
         using var session = new DocxSession(DocxSessionTests.BuildDS001_SimpleTwoParagraphs());

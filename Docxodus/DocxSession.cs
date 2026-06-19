@@ -148,6 +148,11 @@ public sealed record TableInsertOptions
 
     /// <summary>Alignment applied to every cell paragraph (the S-1 columns are centered). null = leave default.</summary>
     public ParagraphAlignment? CellAlignment { get; init; }
+
+    /// <summary>Per-column widths in twips (one per column, left→right). null = equal columns.
+    /// A non-null list whose length != the column count is a caller error (rejected). Drives
+    /// unequal layouts like the S-1's wide-left / narrow-right filing-header row.</summary>
+    public IReadOnlyList<int>? ColumnWidths { get; init; }
 }
 
 /// <summary>List membership for <see cref="DocxSession.ApplyListFormat"/>.</summary>
@@ -4212,20 +4217,34 @@ public sealed class DocxSession : IDisposable
         var opts = options ?? new TableInsertOptions();
         var contents = opts.CellContents;
 
+        // Explicit per-column widths: one per column, all positive. A mismatched count is a
+        // caller error — reject rather than silently equalize (no silent caps).
+        var colWidths = opts.ColumnWidths;
+        if (colWidths is not null && (colWidths.Count != cols || colWidths.Any(w => w <= 0)))
+            return EditResult.Fail(EditErrorCode.MalformedMarkdown,
+                $"ColumnWidths must have one positive width per column ({cols}); got {colWidths.Count}", anchorId);
+
         _history.RecordPreOp(TakeSnapshot());
         try
         {
             const int contentTwips = 9576;           // ~6.65", a US-Letter content width
             int colTwips = contentTwips / cols;
+            int Width(int c) => colWidths is not null ? colWidths[c] : colTwips;
+
+            // With explicit widths the table is sized to their sum (dxa); otherwise it fills
+            // the content area (100% pct) and splits equally.
+            var tblW = colWidths is not null
+                ? new XElement(W.tblW, new XAttribute(W._w, colWidths.Sum()), new XAttribute(W.type, "dxa"))
+                : new XElement(W.tblW, new XAttribute(W._w, 5000), new XAttribute(W.type, "pct"));
 
             var tblPr = new XElement(W.tblPr,
-                new XElement(W.tblW, new XAttribute(W._w, 5000), new XAttribute(W.type, "pct")),
+                tblW,
                 BuildTableBorders(opts.Borderless),
                 new XElement(W.tblLayout, new XAttribute(W.type, "fixed")));
 
             var tblGrid = new XElement(W.tblGrid);
             for (int c = 0; c < cols; c++)
-                tblGrid.Add(new XElement(W.gridCol, new XAttribute(W._w, colTwips)));
+                tblGrid.Add(new XElement(W.gridCol, new XAttribute(W._w, Width(c))));
 
             var tbl = new XElement(W.tbl, tblPr, tblGrid);
             var cellParagraphs = new List<XElement>();
@@ -4236,7 +4255,7 @@ public sealed class DocxSession : IDisposable
                 for (int c = 0; c < cols; c++)
                 {
                     var tc = new XElement(W.tc,
-                        new XElement(W.tcPr, new XElement(W.tcW, new XAttribute(W._w, colTwips), new XAttribute(W.type, "dxa"))));
+                        new XElement(W.tcPr, new XElement(W.tcW, new XAttribute(W._w, Width(c)), new XAttribute(W.type, "dxa"))));
 
                     int idx = r * cols + c;
                     string? md = contents is not null && idx < contents.Count ? contents[idx] : null;

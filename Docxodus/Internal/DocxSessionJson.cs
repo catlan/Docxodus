@@ -155,7 +155,8 @@ internal static class DocxSessionJson
 
     /// <summary>
     /// Parse a <see cref="TableInsertOptions"/> wire object:
-    /// { borderless?: bool, cellContents?: string[], cellAlignment?: "left"|"center"|"right"|"justify" }.
+    /// { borderless?: bool, cellContents?: string[], cellAlignment?: "left"|"center"|"right"|"justify",
+    ///   columnWidths?: number[] (twips, one per column) }.
     /// </summary>
     public static TableInsertOptions ParseTableInsertOptions(string json)
     {
@@ -177,11 +178,19 @@ internal static class DocxSessionJson
             "justify" or "both" => ParagraphAlignment.Justify,
             _ => null,
         };
+        List<int>? widths = null;
+        if (root.TryGetProperty("columnWidths", out var cw) && cw.ValueKind == JsonValueKind.Array)
+        {
+            widths = new List<int>(cw.GetArrayLength());
+            foreach (var item in cw.EnumerateArray())
+                widths.Add(item.ValueKind == JsonValueKind.Number ? item.GetInt32() : 0);
+        }
         return new TableInsertOptions
         {
             Borderless = TryGetBool(root, "borderless", false),
             CellContents = cells,
             CellAlignment = align,
+            ColumnWidths = widths,
         };
     }
 

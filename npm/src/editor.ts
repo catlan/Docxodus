@@ -1044,7 +1044,12 @@ export class DocxEditor {
   insertTable(
     rows: number,
     cols: number,
-    options?: { borderless?: boolean; cellContents?: string[]; cellAlignment?: EditorAlignment },
+    options?: {
+      borderless?: boolean;
+      cellContents?: string[];
+      cellAlignment?: EditorAlignment;
+      columnWidths?: number[];
+    },
   ): void {
     const block = this.activeBlock;
     if (this.closed || !block) return;

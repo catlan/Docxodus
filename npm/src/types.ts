@@ -1160,6 +1160,10 @@ export interface TableInsertOptions {
   cellContents?: string[];
   /** Alignment applied to every cell paragraph (S-1 columns are centered). */
   cellAlignment?: "left" | "center" | "right" | "justify";
+  /** Per-column widths in twips (one per column, left→right). Omit for equal columns; a list
+   *  whose length != the column count is rejected. Drives unequal layouts like the S-1's
+   *  wide-left / narrow-right filing-header row. */
+  columnWidths?: number[];
 }
 
 export interface DocxSessionSettings {
