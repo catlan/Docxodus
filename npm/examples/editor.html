@@ -108,6 +108,16 @@
     <button data-tt="delCol" title="Delete column">&#10005;Col</button>
   </div>
 
+  <!-- Visual table grid picker (replaces the freetext prompt). -->
+  <div id="gridpicker" style="display:none; position:absolute; z-index:30; background:#fff;
+       border:1px solid #c3c7cc; border-radius:8px; padding:8px; box-shadow:0 2px 8px rgba(0,0,0,.2);">
+    <div id="gridcells" style="display:grid; grid-template-columns: repeat(10, 16px); gap:2px;"></div>
+    <div style="margin-top:6px; font-size:12px; display:flex; justify-content:space-between; align-items:center; gap:12px;">
+      <span id="gridlabel">0 × 0</span>
+      <label class="toggle"><input id="gridborderless" type="checkbox" checked /> Borderless</label>
+    </div>
+  </div>
+
   <script>document.write('<script src="./editor.bundle.js?t=' + Date.now() + '"><\/script>');</script>
   <script type="module">
     import { dotnet } from './_framework/dotnet.js';
@@ -166,16 +176,59 @@
       b.addEventListener('mousedown', (e) => e.preventDefault());
       b.addEventListener('click', fn);
     }
+    // Visual table grid picker: hover to choose rows×cols, click to insert.
     const tableBtn = document.getElementById('table');
+    const gridPicker = document.getElementById('gridpicker');
+    const gridCells = document.getElementById('gridcells');
+    const gridLabel = document.getElementById('gridlabel');
+    const gridBorderless = document.getElementById('gridborderless');
+    const GRID_ROWS = 8, GRID_COLS = 10;
+    const cellEls = [];
+    for (let r = 0; r < GRID_ROWS; r++) {
+      for (let c = 0; c < GRID_COLS; c++) {
+        const cell = document.createElement('div');
+        cell.dataset.r = r; cell.dataset.c = c;
+        cell.style.cssText = 'width:16px;height:16px;border:1px solid #c3c7cc;border-radius:2px;background:#f6f7f8;cursor:pointer;';
+        gridCells.appendChild(cell);
+        cellEls.push(cell);
+      }
+    }
+    const hi = (rows, cols) => {
+      for (const cell of cellEls) {
+        const on = (+cell.dataset.r) < rows && (+cell.dataset.c) < cols;
+        cell.style.background = on ? '#d9e7ff' : '#f6f7f8';
+        cell.style.borderColor = on ? '#4c8bf5' : '#c3c7cc';
+      }
+      gridLabel.textContent = `${rows} × ${cols}`;
+    };
+    const closePicker = () => { gridPicker.style.display = 'none'; };
+    gridCells.addEventListener('mouseover', (e) => {
+      const cell = e.target.closest('[data-r]');
+      if (cell) hi((+cell.dataset.r) + 1, (+cell.dataset.c) + 1);
+    });
+    gridCells.addEventListener('mousedown', (e) => {
+      const cell = e.target.closest('[data-r]');
+      if (!cell || !editor) return;
+      e.preventDefault();
+      editor.insertTable((+cell.dataset.r) + 1, (+cell.dataset.c) + 1,
+        { borderless: gridBorderless.checked, cellAlignment: 'center' });
+      closePicker();
+    });
     tableBtn.addEventListener('mousedown', (e) => e.preventDefault());
     tableBtn.addEventListener('click', () => {
       if (!editor) return;
-      const spec = prompt('Table size as "rows x cols" (add " borderless"):', '2 x 3 borderless');
-      if (!spec) return;
-      const m = spec.match(/(\d+)\s*[x×]\s*(\d+)/i);
-      if (!m) return;
-      editor.insertTable(parseInt(m[1], 10), parseInt(m[2], 10),
-        { borderless: /borderless/i.test(spec), cellAlignment: 'center' });
+      if (gridPicker.style.display === 'block') { closePicker(); return; }
+      hi(0, 0);
+      const r = tableBtn.getBoundingClientRect();
+      gridPicker.style.display = 'block';
+      gridPicker.style.left = (window.scrollX + r.left) + 'px';
+      gridPicker.style.top = (window.scrollY + r.bottom + 4) + 'px';
+    });
+    // Dismiss the picker when clicking elsewhere.
+    document.addEventListener('mousedown', (e) => {
+      if (gridPicker.style.display === 'block' && !gridPicker.contains(e.target) && e.target !== tableBtn) {
+        closePicker();
+      }
     });
     styleEl.addEventListener('change', () => {
       if (editor && styleEl.value) { editor.setParagraphStyle(styleEl.value); }
