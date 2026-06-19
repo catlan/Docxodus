@@ -169,8 +169,11 @@
       const pts = parseFloat(fontsizeEl.value);
       if (editor && pts > 0) editor.setFontSize(pts);
     };
+    // Apply on `change` only (fires on Enter and on blur). Enter just commits via blur — binding
+    // applyFontSize to BOTH `change` and keydown fired it twice, stacking two undo snapshots so one
+    // size change took two Ctrl+Z to revert (and the second call re-selected a swapped-out block).
     fontsizeEl.addEventListener('change', applyFontSize);
-    fontsizeEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); applyFontSize(); } });
+    fontsizeEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); fontsizeEl.blur(); } });
     // Reflect the current selection's size in the input (unless the user is editing the field).
     document.addEventListener('selectionchange', () => {
       if (!editor || document.activeElement === fontsizeEl) return;
@@ -283,7 +286,13 @@
         const r = table.getBoundingClientRect();
         tableTools.style.display = 'inline-flex';
         tableTools.style.left = (window.scrollX + r.left) + 'px';
-        tableTools.style.top = (window.scrollY + r.top - 40) + 'px';
+        // Prefer just above the table; if that would tuck under the sticky header (or off-screen
+        // for a table near the page top), drop it just below the table's top edge instead so it
+        // never overlaps the first row.
+        const headerBottom = document.querySelector('header').getBoundingClientRect().bottom;
+        const aboveTop = r.top - tableTools.offsetHeight - 6;
+        const top = aboveTop > headerBottom + 4 ? aboveTop : r.bottom + 6;
+        tableTools.style.top = (window.scrollY + top) + 'px';
       } else {
         tableTools.style.display = 'none';
       }

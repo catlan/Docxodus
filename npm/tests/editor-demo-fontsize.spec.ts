@@ -93,4 +93,56 @@ test.describe('Demo — arbitrary font size', () => {
     expect(sizes.smallPx).toBeGreaterThan(0);  // "small" is its own run
     expect(sizes.smallPx).toBeLessThan(20);    // …left at the default ~11pt, NOT resized
   });
+
+  // S-1 round-3 regression: the size field bound applyFontSize to BOTH `change` and keydown-Enter,
+  // so pressing Enter fired it twice → two undo snapshots → one size change took TWO Ctrl+Z to
+  // revert. Enter now just commits via blur (single `change`), so ONE undo reverts the size.
+  test('applying a size via Enter is reverted by a single undo (no double-fire)', async ({ page }) => {
+    await page.goto('/editor.html');
+    await page.waitForFunction(() => !!(window as any).__demo, { timeout: 60000 });
+    await page.click('#new');
+    await page.waitForFunction(() => !!(window as any).__demo.getEditor());
+
+    // Type "WORD" into the first paragraph and select it.
+    await page.evaluate(() => {
+      const p = document.querySelector('#editor p[data-anchor][contenteditable="true"]') as HTMLElement;
+      p.focus();
+      const r = document.createRange();
+      r.selectNodeContents(p);
+      const s = window.getSelection()!;
+      s.removeAllRanges();
+      s.addRange(r);
+    });
+    await page.keyboard.type('WORD');
+    await page.evaluate(() => {
+      const p = document.querySelector('#editor p[data-anchor]') as HTMLElement;
+      const r = document.createRange();
+      r.selectNodeContents(p);
+      const s = window.getSelection()!;
+      s.removeAllRanges();
+      s.addRange(r);
+    });
+    await page.waitForTimeout(50);
+
+    // Apply 40pt via the field, committing with a real Enter keypress.
+    await page.click('#fontsize');
+    await page.fill('#fontsize', '40');
+    await page.keyboard.press('Enter');
+    await page.waitForTimeout(50);
+
+    const sizePx = () =>
+      page.evaluate(() => {
+        const span = document.querySelector('#editor p[data-anchor] span') as HTMLElement | null;
+        return span ? parseFloat(getComputedStyle(span).fontSize) : 0;
+      });
+    const appliedPx = await sizePx();
+
+    // A SINGLE undo must restore the original size.
+    await page.evaluate(() => (window as any).__demo.getEditor().undo());
+    await page.waitForTimeout(50);
+    const afterOneUndoPx = await sizePx();
+
+    expect(appliedPx).toBeGreaterThan(45);     // 40pt ≈ 53px applied
+    expect(afterOneUndoPx).toBeLessThan(20);   // reverted to ~11pt with ONE undo (was 2 before)
+  });
 });

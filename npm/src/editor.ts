@@ -382,7 +382,10 @@ function selectionSpanIn(block: HTMLElement): { start: number; length: number } 
 /** Restore a content-text selection spanning [start, start+length) within `el` (skips markers). */
 function selectRange(el: HTMLElement, start: number, length: number): void {
   const sel = typeof window !== "undefined" ? window.getSelection() : null;
-  if (!sel) return;
+  // The block may have been swapped out of the document by a re-render before this runs
+  // (e.g. a focus-stealing toolbar control firing twice). addRange on a detached range
+  // throws "the given range isn't in document" — skip rather than warn.
+  if (!sel || !el.isConnected) return;
   el.focus();
   const range = document.createRange();
   const end = start + length;
@@ -413,6 +416,18 @@ function selectRange(el: HTMLElement, start: number, length: number): void {
     sel.removeAllRanges();
     sel.addRange(range);
   }
+}
+
+/**
+ * True when `el`'s immediate parent is a paragraph-border `<div>` the full render wrapped it in
+ * (CreateBorderDivs groups visibly-bordered paragraphs into a div). The body wrapper div has no
+ * border. Splitting/merging such a block must re-render the whole document so the converter can
+ * re-group the border boxes — an in-place node swap would leave the new (often borderless)
+ * paragraph stranded inside the stale border div, drawing the rule's line under its text.
+ */
+function inBorderWrapper(el: HTMLElement): boolean {
+  const style = el.parentElement?.getAttribute("style") ?? "";
+  return /border-(top|bottom|left|right):\s*(?!none)[^;]+/i.test(style);
 }
 
 /** Whether the current selection's start already carries `key`, read from computed style. */
@@ -826,6 +841,8 @@ export class DocxEditor {
     const offset = trimmedSplitOffset(el, rawOffset);
 
     const idx = this.blockIndex(el); // capture before the op (for list remount focus)
+    // Whether this paragraph is rendered inside a border <div> — captured before the DOM mutates.
+    const wrappedInBorder = inBorderWrapper(el);
     fullId = this.syncBlock(el, fullId); // flush any uncommitted typing first
     const res = this.parseEdit(this.exports.DocxSessionBridge.SplitParagraph(this.handle, fullId, offset));
     if (!res.success) return;
@@ -833,9 +850,11 @@ export class DocxEditor {
     const second = res.created?.[0];
     if (!first || !second) return;
 
-    // Splitting a list item makes a continuing list item — re-render the whole document so
-    // numbering continues and the new item shows its marker; put the caret in the new item.
-    if (this.affectsList(res)) {
+    // Splitting a list item makes a continuing list item, and splitting a bordered paragraph (e.g.
+    // a horizontal rule) yields a new paragraph whose border status differs — both need a whole-
+    // document re-render so numbering continues / border <div>s regroup correctly. An in-place node
+    // swap would leave the new paragraph inside the old border div (the rule's line under its text).
+    if (this.affectsList(res) || wrappedInBorder) {
       this.remount(idx + 1, false);
       this.options.onEdit?.({ anchorId: second.id, unid: second.unid });
       return;
@@ -867,6 +886,9 @@ export class DocxEditor {
     if (!prevId || !thisId) return;
 
     const prevIdx = this.blockIndex(prev); // capture before the op
+    // Either side rendered inside a border <div> means the merge changes border grouping — captured
+    // before the DOM mutates so the post-merge branch can force a full re-render.
+    const wrappedInBorder = inBorderWrapper(prev) || inBorderWrapper(el);
     prevId = this.syncBlock(prev, prevId);
     thisId = this.syncBlock(el, thisId);
     const caret = (prev.textContent ?? "").length; // merge boundary
@@ -876,8 +898,9 @@ export class DocxEditor {
     const merged = res.modified?.[0];
     if (!merged) return;
 
-    // Merging list items renumbers the list — re-render fully, caret at the merge boundary.
-    if (this.affectsList(res)) {
+    // Merging list items renumbers the list, and merging across a border <div> boundary changes the
+    // border grouping — both need a whole-document re-render (caret at the merge boundary).
+    if (this.affectsList(res) || wrappedInBorder) {
       this.remount(prevIdx, true);
       this.options.onEdit?.({ anchorId: merged.id, unid: merged.unid });
       return;
