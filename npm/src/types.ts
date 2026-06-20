@@ -289,6 +289,13 @@ export interface ConversionOptions {
    * Examples: "en-US", "fr-FR", "de-DE", "ja-JP"
    */
   documentLanguage?: string;
+  /**
+   * Stamp block-level elements (p, h1-h6, li, table) with a `data-anchor`
+   * attribute carrying the block's stable Unid. Required for the editor to
+   * address blocks in the DOM and drive incremental per-block re-render via
+   * `renderBlockHtml`. Default: false.
+   */
+  stampAnchors?: boolean;
 }
 
 /**
@@ -713,6 +720,12 @@ export interface CompareResult {
 export interface DocxodusWasmExports {
   DocumentConverter: {
     ConvertDocxToHtml: (bytes: Uint8Array) => string;
+    RenderBlockHtml: (
+      bytes: Uint8Array,
+      anchorId: string,
+      cssPrefix: string,
+      fabricateClasses: boolean
+    ) => string;
     ConvertDocxToHtmlWithOptions: (
       bytes: Uint8Array,
       pageTitle: string,
@@ -769,7 +782,8 @@ export interface DocxodusWasmExports {
       showDeletedContent: boolean,
       renderMoveOperations: boolean,
       renderUnsupportedContentPlaceholders: boolean,
-      documentLanguage: string | null
+      documentLanguage: string | null,
+      stampAnchors: boolean
     ) => string;
     GetAnnotations: (bytes: Uint8Array) => string;
     AddAnnotation: (bytes: Uint8Array, requestJson: string) => string;
@@ -947,8 +961,15 @@ export interface DocxodusWasmExports {
   DocxSessionBridge: {
     OpenSession: (bytes: Uint8Array, settingsJson: string) => number;
     CloseSession: (handle: number) => void;
+    CreateBlankDocx: () => Uint8Array;
     Project: (handle: number) => string;
     ProjectAnchor: (handle: number, anchorId: string, depth: number) => string;
+    RenderBlockHtml: (
+      handle: number,
+      anchorId: string,
+      cssPrefix: string,
+      fabricateClasses: boolean
+    ) => string;
     ReplaceText: (handle: number, anchor: string, md: string) => string;
     DeleteBlock: (handle: number, anchor: string) => string;
     DeleteRange: (handle: number, fromAnchorId: string, toAnchorIdExclusive: string) => string;
@@ -956,11 +977,19 @@ export interface DocxodusWasmExports {
     InsertParagraph: (handle: number, anchor: string, pos: string, md: string) => string;
     SplitParagraph: (handle: number, anchor: string, offset: number) => string;
     MergeParagraphs: (handle: number, first: string, second: string) => string;
+    InsertHorizontalRule: (handle: number, anchor: string, pos: string, ruleJson: string) => string;
+    InsertTable: (handle: number, anchor: string, pos: string, rows: number, cols: number, optionsJson: string) => string;
+    InsertTableRow: (handle: number, cellAnchor: string, pos: string) => string;
+    InsertTableColumn: (handle: number, cellAnchor: string, pos: string) => string;
+    DeleteTableRow: (handle: number, cellAnchor: string) => string;
+    DeleteTableColumn: (handle: number, cellAnchor: string) => string;
     ApplyFormat: (handle: number, anchor: string, spanJson: string, opJson: string) => string;
     ApplyFormatBySubstring: (handle: number, anchor: string, substring: string, opJson: string) => string;
     SetParagraphStyle: (handle: number, anchor: string, styleId: string) => string;
+    SetParagraphFormat: (handle: number, anchor: string, opJson: string) => string;
     SetListLevel: (handle: number, anchor: string, delta: number) => string;
     RemoveListMembership: (handle: number, anchor: string) => string;
+    ApplyListFormat: (handle: number, anchor: string, kind: string) => string;
     ReplaceCellContent: (handle: number, anchor: string, md: string) => string;
     RawGetXml: (handle: number, anchor: string) => string;
     RawInsertXml: (handle: number, anchor: string, pos: string, xml: string) => string;
@@ -1087,6 +1116,63 @@ export interface FormatOp {
   code?: boolean;
   color?: string;
   runStyle?: string;
+  /** Vertical alignment: "superscript" | "subscript" | "" (clear). Omit to leave unchanged. */
+  vertAlign?: string;
+  /**
+   * Font size in **points** (maps to `w:sz`/`w:szCs`, stored as half-points). Omit to leave
+   * unchanged; a value &lt;= 0 clears the explicit size. Fractional points round to a half-point.
+   */
+  fontSizePts?: number;
+  /**
+   * Run font family (maps to `w:rFonts` ascii/hAnsi/cs). Omit to leave unchanged; `""` clears
+   * the explicit font so the run inherits the style/default. Lets a run match a serif filing.
+   */
+  fontFamily?: string;
+}
+
+/** One edge of a paragraph border (`w:pBdr` top/bottom) — drives S-1 horizontal rules. */
+export interface ParagraphBorderEdge {
+  /** Border line style (`w:val`): "single","double","thick","dotted","dashed",… Default "single". */
+  style?: string;
+  /** Weight in eighths of a point (`w:sz`). Default 6 (≈0.75pt); a heavy rule ≈ 18–24. */
+  size?: number;
+  /** Hex color without '#', or "auto". Default "auto". */
+  color?: string;
+  /** Padding between border and text, in points (`w:space`). Default 1. */
+  space?: number;
+}
+
+/** List membership for `DocxSession.applyListFormat`. */
+export type ListFormat = "none" | "bullet" | "decimal";
+
+/** Paragraph-level formatting for `DocxSession.setParagraphFormat`. Omit a field to leave it unchanged. */
+export interface ParagraphFormatOp {
+  /** Paragraph alignment. */
+  alignment?: "left" | "center" | "right" | "justify";
+  /** Adjust the left indent by this many twips (1440 = 1 inch); clamped at 0. */
+  indentDelta?: number;
+  /** Page-break-before: true to add, false to remove. */
+  pageBreakBefore?: boolean;
+  /** Top paragraph border (`w:pBdr/w:top`). Omit to leave unchanged. */
+  topBorder?: ParagraphBorderEdge;
+  /** Bottom paragraph border (`w:pBdr/w:bottom`) — what an S-1 horizontal rule is. Omit to leave unchanged. */
+  bottomBorder?: ParagraphBorderEdge;
+  /** Remove all paragraph borders before applying any top/bottom border in this op. */
+  clearBorders?: boolean;
+}
+
+/** Options for `DocxSession.insertTable`. */
+export interface TableInsertOptions {
+  /** Emit an invisible layout table (explicit "none" borders) — the S-1 multi-column blocks. */
+  borderless?: boolean;
+  /** Row-major markdown for each cell (row 0 left→right, then row 1, …). Short/omitted ⇒ empty cells. */
+  cellContents?: string[];
+  /** Alignment applied to every cell paragraph (S-1 columns are centered). */
+  cellAlignment?: "left" | "center" | "right" | "justify";
+  /** Per-column widths in twips (one per column, left→right). Omit for equal columns; a list
+   *  whose length != the column count is rejected. Drives unequal layouts like the S-1's
+   *  wide-left / narrow-right filing-header row. */
+  columnWidths?: number[];
 }
 
 export interface DocxSessionSettings {

@@ -100,6 +100,14 @@ export function openDocxSession(
   return openDocxSessionImpl(bytes, wasm, settings);
 }
 
+/**
+ * Mint a complete, blank single-paragraph DOCX (Normal style, US-Letter section) as bytes —
+ * a "New document" seed for editors that draft from scratch. Requires {@link initialize}.
+ */
+export function createBlankDocx(): Uint8Array {
+  return ensureInitialized().DocxSessionBridge.CreateBlankDocx();
+}
+
 import {
   CommentRenderMode,
   PaginationMode,
@@ -152,6 +160,9 @@ export type {
 } from "./pagination.js";
 
 export { PaginationEngine, paginateHtml } from "./pagination.js";
+
+export { DocxEditor } from "./editor.js";
+export type { DocxEditorOptions, DocxEditorExports } from "./editor.js";
 
 export type {
   ConversionOptions,
@@ -487,6 +498,37 @@ async function toBytes(input: File | Uint8Array): Promise<Uint8Array> {
  * });
  * ```
  */
+/**
+ * Render a single document block to faithful HTML, addressed by its anchor.
+ *
+ * The anchor is the `data-anchor` value stamped on a block during a full
+ * conversion (a bare 32-hex Unid), or a full `kind:scope:unid` anchor — either
+ * form works. Powers the editor's incremental per-block re-render: apply an edit
+ * to a DocxSession, then re-render only the changed block instead of the whole
+ * document. Returns the block's HTML element (no `<html>`/`<head>` wrapper).
+ */
+export async function renderBlockHtml(
+  document: File | Uint8Array,
+  anchorId: string,
+  options?: { cssPrefix?: string; fabricateClasses?: boolean }
+): Promise<string> {
+  const exports = ensureInitialized();
+  const bytes = await toBytes(document);
+  await yieldToMain();
+
+  const result = exports.DocumentConverter.RenderBlockHtml(
+    bytes,
+    anchorId,
+    options?.cssPrefix ?? "docx-",
+    options?.fabricateClasses ?? false
+  );
+
+  if (isErrorResponse(result)) {
+    throw new Error(`Block rendering failed: ${parseError(result).error}`);
+  }
+  return result;
+}
+
 export async function convertDocxToHtml(
   document: File | Uint8Array,
   options?: ConversionOptions
@@ -506,7 +548,8 @@ export async function convertDocxToHtml(
     options?.showDeletedContent !== undefined ||
     options?.renderMoveOperations !== undefined ||
     options?.renderUnsupportedContentPlaceholders !== undefined ||
-    options?.documentLanguage !== undefined;
+    options?.documentLanguage !== undefined ||
+    options?.stampAnchors !== undefined;
 
   // Use complete method when any new options are specified (most comprehensive)
   if (needsCompleteMethod || options?.renderAnnotations) {
@@ -530,7 +573,8 @@ export async function convertDocxToHtml(
       options?.showDeletedContent ?? true,
       options?.renderMoveOperations ?? true,
       options?.renderUnsupportedContentPlaceholders ?? false,
-      options?.documentLanguage ?? null
+      options?.documentLanguage ?? null,
+      options?.stampAnchors ?? false
     );
   }
   // Use pagination-aware method when pagination is requested
