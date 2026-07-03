@@ -205,20 +205,38 @@ internal static class IrCompositeVerifier
                 case IrRowOpKind.ModifyRow:
                 {
                     var baseRow = baseTable!.Rows.First(r => r.Anchor.ToString() == rowOp.BaseRowAnchor);
-                    var cells = rowOp.ComposedCells!;
-                    for (int i = 0; i < baseRow.Cells.Count; i++)
+                    var baseCellByAnchor = baseRow.Cells.ToDictionary(c => c.Anchor.ToString(), c => c);
+                    foreach (var cellOp in rowOp.ComposedCells!)
                     {
-                        var cellOp = i < cells.Count ? cells[i] : null;
-                        if (cellOp?.ComposedBlockOps is { } blockOps)
+                        switch (cellOp.Kind)
                         {
-                            var sb = new System.Text.StringBuilder();
-                            foreach (var b in blockOps)
-                                sb.Append(ReconstructCompositeBlock(b, baseIr, revIr, settings));
-                            fragments.Add(sb.ToString());
-                        }
-                        else
-                        {
-                            fragments.Add(CellText(baseRow.Cells[i], settings)); // base passthrough
+                            case IrAuthoredCellKind.InsertCell:
+                            {
+                                // A reviewer-added cell (column add): its accepted text is the reviewer cell's.
+                                var revCell = cellOp.ShellSourceReviewer >= 0 && cellOp.ShellRightCellAnchor is { } a
+                                    ? FindCell(revIr[cellOp.ShellSourceReviewer].Ir, a) : null;
+                                fragments.Add(revCell != null ? CellText(revCell, settings) : string.Empty);
+                                break;
+                            }
+                            case IrAuthoredCellKind.DeleteCell:
+                                break; // removed on accept
+                            default:
+                                if (cellOp.ComposedBlockOps is { } blockOps)
+                                {
+                                    var sb = new System.Text.StringBuilder();
+                                    foreach (var b in blockOps)
+                                        sb.Append(ReconstructCompositeBlock(b, baseIr, revIr, settings));
+                                    fragments.Add(sb.ToString());
+                                }
+                                else
+                                {
+                                    // base passthrough (resolved by ANCHOR — cell lists may carry inserts)
+                                    Assert.True(cellOp.BaseCellAnchor != null
+                                        && baseCellByAnchor.ContainsKey(cellOp.BaseCellAnchor),
+                                        "composed Content cell must resolve a base cell anchor");
+                                    fragments.Add(CellText(baseCellByAnchor[cellOp.BaseCellAnchor!], settings));
+                                }
+                                break;
                         }
                     }
                     break;
@@ -229,7 +247,9 @@ internal static class IrCompositeVerifier
     }
 
     /// <summary>Reconstruct ONE composite block's accepted text (a cell paragraph block): Equal/FormatOnly →
-    /// base text; Insert → reviewer text; Modify → <see cref="ReconstructModify"/>; Delete → nothing.</summary>
+    /// base text; Insert → reviewer text; Modify → <see cref="ReconstructModify"/>; Delete → nothing;
+    /// native Split/Merge/Move mirror the body switch (a split contributes each right member, a merge the
+    /// merged right paragraph, a move destination the relocated block; a move source contributes nothing).</summary>
     private static string ReconstructCompositeBlock(
         IrCompositeOp cop, IrDocument baseIr,
         IReadOnlyList<(string Author, IrDocument Ir)> revIr, IrDiffSettings settings) =>
@@ -239,6 +259,12 @@ internal static class IrCompositeVerifier
             IrEditOpKind.DeleteBlock => string.Empty,
             IrEditOpKind.InsertBlock => ReviewerBlockText(revIr, cop.SourceReviewer, cop.Op.RightAnchor!, settings),
             IrEditOpKind.ModifyBlock => ReconstructModify(cop, baseIr, revIr, settings),
+            IrEditOpKind.SplitBlock => string.Concat(
+                cop.Op.SplitMergeAnchors!.Select(a => ReviewerBlockText(revIr, cop.SourceReviewer, a, settings))),
+            IrEditOpKind.MergeBlock => ReviewerBlockText(revIr, cop.SourceReviewer, cop.Op.RightAnchor!, settings),
+            IrEditOpKind.MoveBlock or IrEditOpKind.MoveModifyBlock => cop.Op.IsMoveSource != true
+                ? ReviewerBlockText(revIr, cop.SourceReviewer, cop.Op.RightAnchor!, settings)
+                : string.Empty,
             _ => string.Empty,
         };
 
@@ -260,6 +286,30 @@ internal static class IrCompositeVerifier
                 foreach (var row in tbl.Rows)
                     if (row.Anchor.ToString() == rowAnchor)
                         return row;
+        return null;
+    }
+
+    /// <summary>The cell in <paramref name="ir"/> whose anchor matches (cells are not in AnchorIndex),
+    /// recursing nested tables.</summary>
+    private static IrCell? FindCell(IrDocument ir, string cellAnchor)
+    {
+        foreach (var block in ir.AnchorIndex.Values)
+            if (block is IrTable tbl && FindCellInTable(tbl, cellAnchor) is { } found)
+                return found;
+        return null;
+    }
+
+    private static IrCell? FindCellInTable(IrTable tbl, string cellAnchor)
+    {
+        foreach (var row in tbl.Rows)
+            foreach (var cell in row.Cells)
+            {
+                if (cell.Anchor.ToString() == cellAnchor)
+                    return cell;
+                foreach (var b in cell.Blocks)
+                    if (b is IrTable nested && FindCellInTable(nested, cellAnchor) is { } found)
+                        return found;
+            }
         return null;
     }
 

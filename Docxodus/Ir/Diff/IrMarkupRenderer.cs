@@ -185,10 +185,11 @@ internal static class IrMarkupRenderer
                 // (body-reference order, base 1), each note DEFINITION is renumbered + reordered to match, and the
                 // reserved separator/continuation boilerplate notes keep their ids. Runs for EVERY render (cheap and
                 // idempotent when ids already coincide) so accept-by-right-order / reject-by-left-order both hold.
-                RenumberNoteIds(main, W.footnoteReference, W.footnote, W.footnotes,
+                var footnoteRemap = RenumberNoteIds(main, W.footnoteReference, W.footnote, W.footnotes,
                     main.FootnotesPart, wDocRight.MainDocumentPart?.FootnotesPart);
-                RenumberNoteIds(main, W.endnoteReference, W.endnote, W.endnotes,
+                var endnoteRemap = RenumberNoteIds(main, W.endnoteReference, W.endnote, W.endnotes,
                     main.EndnotesPart, wDocRight.MainDocumentPart?.EndnotesPart);
+                RemapNestedNoteReferences(main, footnoteRemap, endnoteRemap);
 
                 // Comment fidelity passes (the comment analogue of NormalizeBookmarks). A commented paragraph now
                 // renders FINELY (token-granular), carrying its range markers + reference run through the diff.
@@ -669,6 +670,52 @@ internal static class IrMarkupRenderer
         return true;
     }
 
+    /// <summary>Emit a composed INSERTED cell (column add): clone the inserting reviewer's whole <c>w:tc</c>
+    /// under that reviewer's state (author attribution + media bucket), mark it <c>w:tcPr/w:cellIns</c> with
+    /// ins-marked content, and append it to <paramref name="newRow"/>. Unresolvable sources emit nothing
+    /// (defensive; the merger only records resolvable reviewer cells).</summary>
+    private static void EmitComposedInsertedCell(
+        IrAuthoredCellOp cellOp, IReadOnlyList<IrDocument> reviewerIrs, RenderState state, XElement newRow)
+    {
+        if (cellOp.ShellSourceReviewer < 0 || cellOp.ShellSourceReviewer >= reviewerIrs.Count
+            || cellOp.ShellRightCellAnchor is not { } anchor
+            || FindCellSource(reviewerIrs[cellOp.ShellSourceReviewer], anchor) is not { } src)
+            return;
+
+        var newCell = StripUnids(new XElement(src));
+        var savedAuthor = state.AuthorOverride;
+        var savedSource = state.RightSource;
+        var savedId = state.RightSourceId;
+        state.AuthorOverride = cellOp.Author;
+        state.RightSource = reviewerIrs[cellOp.ShellSourceReviewer];
+        state.RightSourceId = cellOp.ShellSourceReviewer;
+        state.RegisterMediaReferences(newCell);
+        MarkWholeCell(newCell, RevKind.Ins, state);
+        state.AuthorOverride = savedAuthor;
+        state.RightSource = savedSource;
+        state.RightSourceId = savedId;
+        newRow.Add(newCell);
+    }
+
+    /// <summary>Mark a whole table cell inserted/deleted with Word's native cell-revision marks: a
+    /// <c>w:tcPr/w:cellIns</c>|<c>w:cellDel</c> marker (appended in tcPr — the cell-revision marks sit at the
+    /// end of the property order) plus every paragraph in the cell run-and-mark wrapped. Accept then removes a
+    /// <c>cellDel</c> cell / keeps a <c>cellIns</c> cell bare; reject restores / removes it —
+    /// <see cref="RevisionProcessor"/> implements both sides.</summary>
+    private static void MarkWholeCell(XElement tc, RevKind kind, RenderState state)
+    {
+        var tcPr = tc.Element(W.tcPr);
+        if (tcPr == null)
+        {
+            tcPr = new XElement(W.tcPr);
+            tc.AddFirst(tcPr);
+        }
+        tcPr.Elements().Where(e => e.Name == W.cellIns || e.Name == W.cellDel).Remove();
+        tcPr.Add(new XElement(kind == RevKind.Ins ? W.cellIns : W.cellDel, state.RevisionAttributes()));
+        foreach (var p in tc.Descendants(W.p).ToList())
+            MarkWholeParagraph(p, kind, state);
+    }
+
     /// <summary>Mark a whole table row inserted/deleted: a <c>w:trPr/w:ins</c>|<c>w:del</c> marker (APPENDED in
     /// trPr — the row-revision markers are near the end of the property order) plus every paragraph in the row
     /// run-and-mark wrapped. Accept/reject then add/remove the entire row (and the empty-table cleanup drops the
@@ -849,6 +896,30 @@ internal static class IrMarkupRenderer
         return null;
     }
 
+    /// <summary>The source <c>w:tc</c> a cell anchor resolves to in <paramref name="ir"/> (cells are not in
+    /// AnchorIndex): walk every indexed table's rows/cells, recursing into nested tables. Null if unknown.</summary>
+    private static XElement? FindCellSource(IrDocument ir, string cellAnchor)
+    {
+        foreach (var block in ir.AnchorIndex.Values)
+            if (block is IrTable tbl && FindCellSourceInTable(tbl, cellAnchor) is { } found)
+                return found;
+        return null;
+    }
+
+    private static XElement? FindCellSourceInTable(IrTable tbl, string cellAnchor)
+    {
+        foreach (var row in tbl.Rows)
+            foreach (var cell in row.Cells)
+            {
+                if (cell.Anchor.ToString() == cellAnchor)
+                    return cell.Source.Element;
+                foreach (var b in cell.Blocks)
+                    if (b is IrTable nested && FindCellSourceInTable(nested, cellAnchor) is { } found)
+                        return found;
+            }
+        return null;
+    }
+
     /// <summary>Emit a composed ModifyRow: a new <c>w:tr</c> from the BASE row's trPr + per-cell content (base
     /// passthrough or per-cell-block composite render).</summary>
     private static void EmitComposedModifyRow(
@@ -874,13 +945,46 @@ internal static class IrMarkupRenderer
 
         foreach (var cellOp in cells)
         {
+            // A reviewer-INSERTED cell (column add): the whole cell clones from the reviewer, marked
+            // w:tcPr/w:cellIns + ins-marked content — accept keeps it, reject removes it.
+            if (cellOp.Kind == IrAuthoredCellKind.InsertCell)
+            {
+                EmitComposedInsertedCell(cellOp, reviewerIrs, state, newRow);
+                continue;
+            }
+
             XElement? baseCellSrc = cellOp.BaseCellAnchor != null
                 && baseCellsByAnchor.TryGetValue(cellOp.BaseCellAnchor, out var bc) ? bc : null;
             if (baseCellSrc == null)
                 continue;
 
+            // A reviewer-DELETED base cell (column remove): the base cell marked w:tcPr/w:cellDel +
+            // del-marked content — accept removes it, reject restores it.
+            if (cellOp.Kind == IrAuthoredCellKind.DeleteCell)
+            {
+                var deletedCell = StripUnids(new XElement(baseCellSrc));
+                var savedAuthor0 = state.AuthorOverride;
+                state.AuthorOverride = cellOp.Author;
+                MarkWholeCell(deletedCell, RevKind.Del, state);
+                state.AuthorOverride = savedAuthor0;
+                newRow.Add(deletedCell);
+                continue;
+            }
+
+            // The cell SHELL (tcPr etc.) is cloned from the base cell by default; when the merger attributed
+            // the shell to a reviewer (ShellSourceReviewer/ShellRightCellAnchor — a changed cell, so a
+            // width/merge-only edit composes instead of silently reverting to the base shell), clone that
+            // reviewer's right-cell shell instead. Falls back to base if the reviewer cell is unresolvable.
+            var shellSrc = baseCellSrc;
+            if (cellOp.ShellSourceReviewer >= 0 && cellOp.ShellSourceReviewer < reviewerIrs.Count
+                && cellOp.ShellRightCellAnchor is { } shellAnchor
+                && FindCellSource(reviewerIrs[cellOp.ShellSourceReviewer], shellAnchor) is { } reviewerCellSrc)
+            {
+                shellSrc = reviewerCellSrc;
+            }
+
             var newCell = new XElement(W.tc);
-            foreach (var pre in baseCellSrc.Elements().Where(e => e.Name != W.p && e.Name != W.tbl))
+            foreach (var pre in shellSrc.Elements().Where(e => e.Name != W.p && e.Name != W.tbl))
                 newCell.Add(StripUnids(new XElement(pre)));
 
             if (cellOp.ComposedBlockOps is { } blockOps)
@@ -1106,28 +1210,33 @@ internal static class IrMarkupRenderer
     /// opposite side's references — never dangle: each surviving reference still resolves, and the kept ids stay an
     /// ASCENDING subsequence of the renumbered space, so the read-order note sequence matches the right document on
     /// accept and the left on reject. Idempotent when ids already coincide; runs for every render.
-    /// <para><b>Known limitations (unexercised in the M2.6 corpus; documented per the T1 review).</b>
-    /// (1) <i>Note-ref nested in a note body is not renumbered.</i> The reference walk scans <c>w:body</c>
-    /// descendants only, so a footnote/endnote reference that lives INSIDE another note's definition body
-    /// (a note that itself cites a note) keeps its original <c>@w:id</c> — only body-anchored references drive
-    /// the renumber. No corpus fixture exercises note-in-note references; if one arises, the walk must also
-    /// visit references inside the note part(s).
-    /// (2) <i>Deleted EMPTY-bodied note dequeue keys on <c>w:delText</c>.</i> <c>IsDeletedOnly</c> classifies a
+    /// <para><b>Nested references.</b> The body walk cannot see a reference living INSIDE a note's definition
+    /// body (a note that itself cites a note). Each renumbered definition's old→new id is therefore returned
+    /// to the caller, which — after BOTH kinds' passes ran — sweeps BOTH note parts remapping nested
+    /// references of BOTH kinds (<see cref="RemapNestedNoteReferences"/>). Same-kind nesting (a footnote
+    /// citing a footnote) and CROSS-kind nesting (a footnote citing an endnote, or vice versa) are both
+    /// covered: the cross-kind case needs the OTHER kind's remap applied to THIS kind's part, which is why the
+    /// sweep runs once over both parts with both maps rather than per-pass.</para>
+    /// <para><b>Known limitation (unexercised in the M2.6 corpus; documented per the T1 review).</b>
+    /// <i>Deleted EMPTY-bodied note dequeue keys on <c>w:delText</c>.</i> <c>IsDeletedOnly</c> classifies a
     /// definition as deleted-only via "has <c>w:delText</c> and no live <c>w:t</c>"; a deleted note whose body
     /// carries NO text at all (no <c>w:delText</c>, no <c>w:t</c>) is therefore not enqueued in <c>delDefs</c>,
     /// so a <c>w:del</c> body reference could dequeue the wrong deleted def (or none). No corpus fixture has a
     /// textless deleted note; a robust fix would key deletedness on the reference/definition correspondence the
     /// builder already records rather than on body text presence.</para>
     /// </summary>
-    private static void RenumberNoteIds(MainDocumentPart main, XName refName, XName noteName, XName rootName,
+    /// <returns>Each renumbered definition's OLD id → NEW id (empty when nothing renumbered), for the caller's
+    /// nested-reference sweep across both note parts.</returns>
+    internal static Dictionary<string, string> RenumberNoteIds(MainDocumentPart main, XName refName, XName noteName, XName rootName,
         OpenXmlPart? notePart, OpenXmlPart? rightNotePart)
     {
+        var empty = new Dictionary<string, string>(StringComparer.Ordinal);
         if (notePart == null)
-            return;
+            return empty;
         var noteXDoc = notePart.GetXDocument();
         var noteRoot = noteXDoc.Root;
         if (noteRoot == null)
-            return;
+            return empty;
 
         // Partition: reserved boilerplate (kept verbatim, leads the part) vs real notes (renumber candidates).
         bool IsReserved(XElement note) =>
@@ -1142,7 +1251,7 @@ internal static class IrMarkupRenderer
         if (bodyRefs.Count == 0)
         {
             // No references — nothing to renumber against; leave the part as-is.
-            return;
+            return empty;
         }
 
         // A definition is DELETED-ONLY (left-sourced, vanishes on accept) iff every run carrying text is inside a
@@ -1171,7 +1280,8 @@ internal static class IrMarkupRenderer
         var assignedIdByDef = new Dictionary<XElement, string>();
         // Each renumbered definition's OLD id → NEW id, so a reference to it that the body walk did NOT visit
         // (one nested INSIDE another note's body — a note that cites a note) can be remapped afterwards. Without
-        // this the nested ref keeps the old id while its definition moves, dangling on accept/reject.
+        // this the nested ref keeps the old id while its definition moves, dangling on accept/reject. Returned
+        // to the caller, which sweeps BOTH note parts once BOTH kinds' remaps exist (cross-kind nesting).
         var idRemap = new Dictionary<string, string>(StringComparer.Ordinal);
         // Real notes renumber to 1..N — but a RESERVED boilerplate note can occupy a POSITIVE id (Word's
         // continuationNotice rides at id 1 in the NVCA contract), and reserved notes keep their ids and lead the
@@ -1235,23 +1345,48 @@ internal static class IrMarkupRenderer
         foreach (var note in orderedDefs)
             noteRoot.Add(note);
 
-        // Remap NESTED references — a same-kind note reference living inside another note's body (a note that
-        // cites a note). The body walk above renumbered every body reference + definition, but never visited
-        // references inside note bodies, so a nested reference to a renumbered definition still carries the OLD
-        // id and would dangle. Rewrite each nested reference whose id was renumbered to its definition's new id.
-        // (Cross-kind nesting — an endnote reference inside a footnote body, or vice versa — is remapped by the
-        // OTHER scope's pass only if that scope's part is scanned; v1 scans each part for its OWN kind, which
-        // covers the footnote-cites-footnote / endnote-cites-endnote cases the corpus and Word produce.)
-        if (idRemap.Count > 0)
-            foreach (var nestedRef in noteRoot.Descendants(refName))
-            {
-                var id = (string?)nestedRef.Attribute(W.id);
-                if (id != null && idRemap.TryGetValue(id, out var mapped))
-                    nestedRef.SetAttributeValue(W.id, mapped);
-            }
-
         main.PutXDocument();
         notePart.PutXDocument();
+
+        // NESTED references (same-kind AND cross-kind) are remapped by the caller's
+        // RemapNestedNoteReferences sweep, which runs after BOTH kinds' renumber passes so a footnote-nested
+        // endnote reference sees the endnote remap and vice versa.
+        return idRemap;
+    }
+
+    /// <summary>
+    /// Remap NESTED note references — references living inside another note's definition body, which the
+    /// body-order renumber walk never visits — across BOTH note parts, for BOTH kinds. A footnote body can
+    /// nest a footnote reference (same-kind) or an endnote reference (CROSS-kind), and vice versa; each nested
+    /// reference whose definition was renumbered must follow it or it dangles on accept/reject. Runs once,
+    /// after both <see cref="RenumberNoteIds"/> passes, with both kinds' old→new maps — a per-pass sweep
+    /// cannot fix cross-kind nesting because the other kind's remap does not exist yet.
+    /// </summary>
+    internal static void RemapNestedNoteReferences(MainDocumentPart main,
+        Dictionary<string, string> footnoteRemap, Dictionary<string, string> endnoteRemap)
+    {
+        if (footnoteRemap.Count == 0 && endnoteRemap.Count == 0)
+            return;
+        foreach (var part in new OpenXmlPart?[] { main.FootnotesPart, main.EndnotesPart })
+        {
+            var root = part?.GetXDocument().Root;
+            if (root == null)
+                continue;
+            bool changed = false;
+            foreach (var nestedRef in root.Descendants()
+                         .Where(e => e.Name == W.footnoteReference || e.Name == W.endnoteReference))
+            {
+                var remap = nestedRef.Name == W.footnoteReference ? footnoteRemap : endnoteRemap;
+                var id = (string?)nestedRef.Attribute(W.id);
+                if (id != null && remap.TryGetValue(id, out var mapped))
+                {
+                    nestedRef.SetAttributeValue(W.id, mapped);
+                    changed = true;
+                }
+            }
+            if (changed)
+                part!.PutXDocument();
+        }
     }
 
     // ----------------------------------------------------------------- comment normalization
@@ -3050,7 +3185,7 @@ internal static class IrMarkupRenderer
 
     /// <summary>Strip the reader-assigned <c>pt:Unid</c> bookkeeping attributes/elements from a cloned element so
     /// the output carries no engine-internal markup.</summary>
-    private static XElement StripUnids(XElement el)
+    internal static XElement StripUnids(XElement el)
     {
         foreach (var attr in el.DescendantsAndSelf().Attributes()
                      .Where(a => a.Name.Namespace == PtOpenXml.pt || a.Name == PtOpenXml.Unid).ToList())
@@ -3157,9 +3292,18 @@ internal static class IrMarkupRenderer
             return name;
         }
 
+        /// <summary>RIGHT-sourced clone roots that carry a footnote/endnote REFERENCE, bucketed by
+        /// <see cref="RightSourceId"/> — the composite renderer's note-id rewrite pass walks these to remap
+        /// each reviewer-sourced reference from that reviewer's id space to the base-anchored output space.
+        /// Unused (empty) in a two-way render (the rewrite pass only runs in the composite path).</summary>
+        public Dictionary<int, List<XElement>> NoteRefClonesBySource { get; } = new();
+
         /// <summary>Record a RIGHT-sourced clone for media import iff it references any relationship id (an
         /// image embed/link), into the bucket for the currently-active <see cref="RightSourceId"/>. The recorded
-        /// element is the live tree node; importing happens post-assembly. Two-way always records into bucket 0.</summary>
+        /// element is the live tree node; importing happens post-assembly. Two-way always records into bucket 0.
+        /// Also records the clone into <see cref="NoteRefClonesBySource"/> when it carries a footnote/endnote
+        /// reference — the composite note-id rewrite's per-reviewer attribution rides the same choke point
+        /// every right-sourced clone already passes through.</summary>
         public void RegisterMediaReferences(XElement clone)
         {
             if (clone.DescendantsAndSelf().Attributes().Any(a => a.Name.Namespace == R.r))
@@ -3167,6 +3311,13 @@ internal static class IrMarkupRenderer
                 if (!RightSourcedClonesBySource.TryGetValue(RightSourceId, out var list))
                     RightSourcedClonesBySource[RightSourceId] = list = new List<XElement>();
                 list.Add(clone);
+            }
+            if (clone.DescendantsAndSelf()
+                    .Any(e => e.Name == W.footnoteReference || e.Name == W.endnoteReference))
+            {
+                if (!NoteRefClonesBySource.TryGetValue(RightSourceId, out var refs))
+                    NoteRefClonesBySource[RightSourceId] = refs = new List<XElement>();
+                refs.Add(clone);
             }
         }
     }

@@ -317,21 +317,22 @@ public class IrCompositeTableTests
         Assert.Equal(Docs.StructuralBody(baseDoc), Reject(merged));
     }
 
-    // ------------------------------------------------------------------ 8. MovedRow fallback (STOP boundary)
+    // ------------------------------------------------------------------ 8. MovedRow composition + contested fallback
 
     /// <summary>
-    /// #8 — MovedRow present → block-level conflict fallback (STOP boundary). When any reviewer's table diff
-    /// has a MovedRow, the per-cell compose bails to the existing whole-table block conflict. No silent loss;
-    /// reject ≡ base.
+    /// #8 — An UNCONTESTED reviewer row move COMPOSES with another reviewer's edit to a different row: the
+    /// move lands (lowered to the del+ins row shape the two-way renderer itself uses), Bob's cell edit lands,
+    /// no conflict, reject ≡ base. (Was: ANY MovedRow → whole-table conflict fallback; the sole-toucher gate
+    /// now composes it — the row analogue of the block move plan.)
     /// </summary>
     [Theory]
     [InlineData(ConflictResolution.BaseWins)]
     [InlineData(ConflictResolution.FirstReviewerWins)]
     [InlineData(ConflictResolution.StackAll)]
-    public void MovedRow_falls_back_to_block_conflict(ConflictResolution policy)
+    public void Uncontested_MovedRow_composes_with_other_reviewers_row_edit(ConflictResolution policy)
     {
         // A 3-row table with UNIQUE row hashes so the row aligner anchors them; Alice reorders rows
-        // (a MovedRow), Bob edits a cell — two reviewers touch the same base table.
+        // (a MovedRow of "alpha row"), Bob edits a DIFFERENT row's cell — no contention on alpha.
         var baseDoc = IrTestDocuments.FromBodyXml(
             Lead +
             Table(
@@ -351,51 +352,160 @@ public class IrCompositeTableTests
                 Row(Cell("bravo row EDIT")),
                 Row(Cell("charlie row"))));
 
-        // Falls back to a recorded whole-table conflict — no silent loss.
+        Assert.Empty(Conflicts(baseDoc, policy, ("Alice", alice), ("Bob", bob)));
+
+        var merged = Consolidate(baseDoc, policy, ("Alice", alice), ("Bob", bob));
+        var accept = Accept(merged);
+        Assert.Contains("bravo row EDIT", accept);
+        Assert.Contains("alpha row", accept);
+        // Alice's move landed: alpha now AFTER bravo in the accepted row order.
+        Assert.True(accept.IndexOf("bravo row", System.StringComparison.Ordinal)
+                    < accept.IndexOf("alpha row", System.StringComparison.Ordinal),
+            $"alpha row should follow bravo row after the accepted move; accept body: {accept}");
+        Assert.Equal(1, CountOccurrences(accept, "alpha row"));
+
+        Assert.Equal(Docs.StructuralBody(baseDoc), Reject(merged));
+    }
+
+    /// <summary>
+    /// #8b — A CONTESTED row move (Bob EDITS the same base row Alice moves) still falls back to the
+    /// whole-table block conflict (STOP boundary). No silent loss; reject ≡ base.
+    /// </summary>
+    [Theory]
+    [InlineData(ConflictResolution.BaseWins)]
+    [InlineData(ConflictResolution.FirstReviewerWins)]
+    [InlineData(ConflictResolution.StackAll)]
+    public void Contested_MovedRow_falls_back_to_block_conflict(ConflictResolution policy)
+    {
+        var baseDoc = IrTestDocuments.FromBodyXml(
+            Lead +
+            Table(
+                Row(Cell("alpha row")),
+                Row(Cell("bravo row")),
+                Row(Cell("charlie row"))));
+        var alice = IrTestDocuments.FromBodyXml(
+            Lead +
+            Table(
+                Row(Cell("bravo row")),
+                Row(Cell("alpha row")),   // alpha moved down (a row move)
+                Row(Cell("charlie row"))));
+        var bob = IrTestDocuments.FromBodyXml(
+            Lead +
+            Table(
+                Row(Cell("alpha row EDIT")),   // edits the SAME row Alice moves
+                Row(Cell("bravo row")),
+                Row(Cell("charlie row"))));
+
+        // Contested move → recorded whole-table conflict — no silent loss.
         Assert.NotEmpty(Conflicts(baseDoc, policy, ("Alice", alice), ("Bob", bob)));
 
         var merged = Consolidate(baseDoc, policy, ("Alice", alice), ("Bob", bob));
         Assert.Equal(Docs.StructuralBody(baseDoc), Reject(merged));
     }
 
-    // ------------------------------------------------------------------ 9. column-count change fallback (gate)
+    // ------------------------------------------------------------------ 9. column add/remove composition
 
     /// <summary>
-    /// #9 — Column add/remove → block-level conflict fallback (gate test). When a reviewer adds a column
-    /// (changing the cell count of a row) while another edits a different cell, the positional per-cell render
-    /// (which clones the base row's cell skeleton, count-stable in v1) cannot compose the column change — so it
-    /// bails to a recorded whole-table block conflict. No silent loss: a conflict is recorded under every
-    /// policy, and BaseWins (which keeps the base table) rejects to base.
-    /// <para>(A pure <c>w:tcPr</c> width change is NOT modeled by the IR — it leaves every hash identical, so
-    /// the reviewer's table reads as EqualBlock (no touch) and composes trivially as single-source; only a
-    /// genuine cell-count change is a detectable STOP boundary. reject ≡ base is NOT asserted for
-    /// FirstReviewerWins/StackAll here: those emit the reviewer's column-changed table, and a 2-way column
-    /// ADD is not yet marked as a tracked insertion — a pre-existing whole-table-renderer limitation,
-    /// independent of this follow-on. The fallback's job is no-silent-loss, which holds.)</para>
+    /// #9 — Column ADD composes. Alice adds a 3rd cell to row 0 (a right-only cell op) while Bob edits
+    /// cell(1,1): both land — the added cell renders with native <c>w:tcPr/w:cellIns</c> markup (accept keeps
+    /// it, reject removes it, restoring the base column count) — and no conflict is recorded. (Was: any
+    /// cell-count change → whole-table block-conflict STOP fallback; anchor-based cell pairing +
+    /// InsertCell/DeleteCell composition replaced the gate.)
     /// </summary>
     [Theory]
     [InlineData(ConflictResolution.BaseWins)]
     [InlineData(ConflictResolution.FirstReviewerWins)]
     [InlineData(ConflictResolution.StackAll)]
-    public void Column_count_change_falls_back_to_block_conflict(ConflictResolution policy)
+    public void Column_add_composes_with_other_reviewers_edit(ConflictResolution policy)
     {
         var baseDoc = Base2x2();
         var alice = IrTestDocuments.FromBodyXml(
             Lead +
             Table(
-                Row(Cell("a one"), Cell("b two"), Cell("NEW col")), // adds a 3rd column to row 0
+                Row(Cell("a one"), Cell("b two"), Cell("NEW col")), // adds a 3rd cell to row 0
                 Row(Cell("c three"), Cell("d four"))));
         var bob = Variant2x2("a one", "b two", "c three", "d BOB"); // edits cell(1,1) text
 
-        // Column add → fall back to recorded whole-table conflict (no silent loss).
-        Assert.NotEmpty(Conflicts(baseDoc, policy, ("Alice", alice), ("Bob", bob)));
+        Assert.Empty(Conflicts(baseDoc, policy, ("Alice", alice), ("Bob", bob)));
 
-        // BaseWins keeps the base table → reject ≡ base (the fallback's reject contract on the base-kept path).
-        if (policy == ConflictResolution.BaseWins)
+        var merged = Consolidate(baseDoc, policy, ("Alice", alice), ("Bob", bob));
+        var accept = Accept(merged);
+        Assert.Contains("NEW col", accept);
+        Assert.Contains("d BOB", accept);
+
+        // reject ≡ base: the cellIns'd cell is removed, restoring the 2-cell row.
+        Assert.Equal(Docs.StructuralBody(baseDoc), Reject(merged));
+    }
+
+    /// <summary>
+    /// #9b — Column REMOVE composes. Alice deletes row 0's second cell while Bob edits cell(1,1): the removed
+    /// cell renders with native <c>w:tcPr/w:cellDel</c> markup (accept removes it, reject restores it), Bob's
+    /// edit lands, no conflict.
+    /// </summary>
+    [Theory]
+    [InlineData(ConflictResolution.BaseWins)]
+    [InlineData(ConflictResolution.FirstReviewerWins)]
+    [InlineData(ConflictResolution.StackAll)]
+    public void Column_remove_composes_with_other_reviewers_edit(ConflictResolution policy)
+    {
+        var baseDoc = Base2x2();
+        var alice = IrTestDocuments.FromBodyXml(
+            Lead +
+            Table(
+                Row(Cell("a one")),                        // removes row 0's second cell
+                Row(Cell("c three"), Cell("d four"))));
+        var bob = Variant2x2("a one", "b two", "c three", "d BOB");
+
+        Assert.Empty(Conflicts(baseDoc, policy, ("Alice", alice), ("Bob", bob)));
+
+        var merged = Consolidate(baseDoc, policy, ("Alice", alice), ("Bob", bob));
+        var accept = Accept(merged);
+        Assert.DoesNotContain("b two", accept);
+        Assert.Contains("d BOB", accept);
+
+        // reject ≡ base: the cellDel'd cell is restored.
+        Assert.Equal(Docs.StructuralBody(baseDoc), Reject(merged));
+    }
+
+    /// <summary>
+    /// #9c — Cell delete-vs-edit conflict. Alice removes row 0's second cell; Bob edits the text INSIDE that
+    /// same cell → a recorded conflict (never a silent drop), resolved per policy: BaseWins keeps the base
+    /// cell; FirstReviewerWins/StackAll apply the first reviewer (Alice's removal).
+    /// </summary>
+    [Theory]
+    [InlineData(ConflictResolution.BaseWins)]
+    [InlineData(ConflictResolution.FirstReviewerWins)]
+    [InlineData(ConflictResolution.StackAll)]
+    public void Cell_delete_vs_edit_records_conflict(ConflictResolution policy)
+    {
+        var baseDoc = Base2x2();
+        var alice = IrTestDocuments.FromBodyXml(
+            Lead +
+            Table(
+                Row(Cell("a one")),                        // removes row 0's second cell
+                Row(Cell("c three"), Cell("d four"))));
+        var bob = Variant2x2("a one", "b BOB", "c three", "d four"); // edits the cell Alice removes
+
+        var conflicts = Conflicts(baseDoc, policy, ("Alice", alice), ("Bob", bob));
+        Assert.NotEmpty(conflicts);
+        var authors = conflicts.SelectMany(c => c.Competitors.Select(x => x.Author)).Distinct().ToList();
+        Assert.Contains("Alice", authors);
+        Assert.Contains("Bob", authors);
+
+        var merged = Consolidate(baseDoc, policy, ("Alice", alice), ("Bob", bob));
+        var accept = Accept(merged);
+        switch (policy)
         {
-            var merged = Consolidate(baseDoc, policy, ("Alice", alice), ("Bob", bob));
-            Assert.Equal(Docs.StructuralBody(baseDoc), Reject(merged));
+            case ConflictResolution.BaseWins:
+                Assert.Contains("b two", accept);          // base cell kept
+                Assert.DoesNotContain("b BOB", accept);
+                break;
+            default:
+                Assert.DoesNotContain("b two", accept);    // Alice (first reviewer) removed the cell
+                Assert.DoesNotContain("b BOB", accept);
+                break;
         }
+        Assert.Equal(Docs.StructuralBody(baseDoc), Reject(merged));
     }
 
     // ------------------------------------------------------------------ 10. all 3 policies over same-cell conflict
@@ -722,6 +832,164 @@ public class IrCompositeTableTests
             hashes.Add(IrHash.Compute(mem.ToArray()));
         }
         return hashes;
+    }
+
+    // ------------------------------------------------------------------ cell-shell (w:tcPr) edits
+
+    private static string CellW(string text, int widthTwips) =>
+        $"<w:tc><w:tcPr><w:tcW w:w=\"{widthTwips}\" w:type=\"dxa\"/></w:tcPr>" +
+        $"<w:p><w:r><w:t xml:space=\"preserve\">{text}</w:t></w:r></w:p></w:tc>";
+
+    /// <summary>A 2x2 table whose four cells carry explicit tcW widths (row-major order).</summary>
+    private static WmlDocument WidthTable2x2(
+        (string Text, int W) c00, (string Text, int W) c01, (string Text, int W) c10, (string Text, int W) c11)
+        => IrTestDocuments.FromBodyXml(
+            Lead +
+            Table(
+                Row(CellW(c00.Text, c00.W), CellW(c01.Text, c01.W)),
+                Row(CellW(c10.Text, c10.W), CellW(c11.Text, c11.W))));
+
+    /// <summary>Every body-table <c>w:tcW/@w:w</c> value in document (row-major) order.</summary>
+    private static List<string> CellWidths(WmlDocument d)
+    {
+        var ns = (XNamespace)IrTestDocuments.W;
+        return XDocument.Parse(Docs.MainPartXml(d))
+            .Descendants(ns + "tcW")
+            .Select(e => e.Attribute(ns + "w")?.Value ?? "")
+            .ToList();
+    }
+
+    /// <summary>
+    /// Cell-shell visibility (pairwise): a WIDTH-ONLY cell edit — no text change anywhere — must be visible
+    /// to Compare and land on accept. Before the shell digest participated in the cell ContentHash, the table
+    /// pair classified EqualBlock and the edit silently vanished (a soundness gap, zero markup emitted).
+    /// </summary>
+    [Fact]
+    public void Pairwise_width_only_cell_edit_is_visible_and_lands()
+    {
+        var left = WidthTable2x2(("a one", 2000), ("b two", 2000), ("c three", 2000), ("d four", 2000));
+        var right = WidthTable2x2(("a one", 5000), ("b two", 2000), ("c three", 2000), ("d four", 2000));
+
+        var result = DocxDiff.Compare(left, right);
+        var accepted = RevisionAccepter.AcceptRevisions(result);
+        var rejected = RevisionProcessor.RejectRevisions(result);
+
+        // The width edit lands on accept (cell(0,0) = 5000) and text round-trips both ways.
+        Assert.Equal(CellWidths(right), CellWidths(accepted));
+        Assert.Equal(Docs.StructuralBody(right), Docs.StructuralBody(accepted));
+        Assert.Equal(Docs.StructuralBody(left), Docs.StructuralBody(rejected));
+    }
+
+    /// <summary>
+    /// Cell-shell compose: Alice changes ONLY cell(0,0)'s width, Bob edits cell(1,1)'s text → both compose,
+    /// no conflict, Alice's width + Bob's text both land on accept; reject ≡ base at the text level.
+    /// (Before the fix Alice's table read as EqualBlock and her width edit silently vanished.)
+    /// </summary>
+    [Theory]
+    [InlineData(ConflictResolution.BaseWins)]
+    [InlineData(ConflictResolution.FirstReviewerWins)]
+    [InlineData(ConflictResolution.StackAll)]
+    public void Width_only_edit_composes_with_other_reviewers_text_edit(ConflictResolution policy)
+    {
+        var baseDoc = WidthTable2x2(("a one", 2000), ("b two", 2000), ("c three", 2000), ("d four", 2000));
+        var alice = WidthTable2x2(("a one", 5000), ("b two", 2000), ("c three", 2000), ("d four", 2000));
+        var bob = WidthTable2x2(("a one", 2000), ("b two", 2000), ("c three", 2000), ("d BOB", 2000));
+
+        Assert.Empty(Conflicts(baseDoc, policy, ("Alice", alice), ("Bob", bob)));
+
+        var merged = Consolidate(baseDoc, policy, ("Alice", alice), ("Bob", bob));
+        var accepted = RevisionAccepter.AcceptRevisions(merged);
+        Assert.Contains("d BOB", Docs.PlainTextWithTables(accepted));
+        Assert.Equal(new[] { "5000", "2000", "2000", "2000" }, CellWidths(accepted));
+
+        Assert.Equal(Docs.StructuralBody(baseDoc), Reject(merged));
+    }
+
+    /// <summary>
+    /// Cell-shell consensus: two reviewers set the SAME new width on the same cell (texts untouched) → no
+    /// conflict, the agreed width lands once.
+    /// </summary>
+    [Theory]
+    [InlineData(ConflictResolution.BaseWins)]
+    [InlineData(ConflictResolution.StackAll)]
+    public void Agreeing_width_edits_compose_without_conflict(ConflictResolution policy)
+    {
+        var baseDoc = WidthTable2x2(("a one", 2000), ("b two", 2000), ("c three", 2000), ("d four", 2000));
+        var alice = WidthTable2x2(("a one", 5000), ("b two", 2000), ("c three", 2000), ("d four", 2000));
+        var bob = WidthTable2x2(("a one", 5000), ("b two", 2000), ("c three", 2000), ("d four", 2000));
+
+        Assert.Empty(Conflicts(baseDoc, policy, ("Alice", alice), ("Bob", bob)));
+
+        var merged = Consolidate(baseDoc, policy, ("Alice", alice), ("Bob", bob));
+        var accepted = RevisionAccepter.AcceptRevisions(merged);
+        Assert.Equal(new[] { "5000", "2000", "2000", "2000" }, CellWidths(accepted));
+        Assert.Equal(Docs.StructuralBody(baseDoc), Reject(merged));
+    }
+
+    /// <summary>
+    /// Cell-shell conflict: two reviewers set DIFFERENT widths on the SAME cell (texts untouched) → a
+    /// recorded conflict (never a silent drop), resolved per policy: BaseWins keeps the base width;
+    /// FirstReviewerWins/StackAll take the first reviewer's width (shells cannot stack).
+    /// </summary>
+    [Theory]
+    [InlineData(ConflictResolution.BaseWins)]
+    [InlineData(ConflictResolution.FirstReviewerWins)]
+    [InlineData(ConflictResolution.StackAll)]
+    public void Competing_width_edits_same_cell_record_conflict(ConflictResolution policy)
+    {
+        var baseDoc = WidthTable2x2(("a one", 2000), ("b two", 2000), ("c three", 2000), ("d four", 2000));
+        var alice = WidthTable2x2(("a one", 3000), ("b two", 2000), ("c three", 2000), ("d four", 2000));
+        var bob = WidthTable2x2(("a one", 4000), ("b two", 2000), ("c three", 2000), ("d four", 2000));
+
+        var conflicts = Conflicts(baseDoc, policy, ("Alice", alice), ("Bob", bob));
+        Assert.NotEmpty(conflicts);
+        var authors = conflicts.SelectMany(c => c.Competitors.Select(x => x.Author)).Distinct().ToList();
+        Assert.Contains("Alice", authors);
+        Assert.Contains("Bob", authors);
+
+        var merged = Consolidate(baseDoc, policy, ("Alice", alice), ("Bob", bob));
+        var accepted = RevisionAccepter.AcceptRevisions(merged);
+        var expectedC00 = policy == ConflictResolution.BaseWins ? "2000" : "3000";
+        Assert.Equal(new[] { expectedC00, "2000", "2000", "2000" }, CellWidths(accepted));
+
+        // Text is untouched by shell edits — reject ≡ base and accept text ≡ base text.
+        Assert.Equal(Docs.StructuralBody(baseDoc), Reject(merged));
+        Assert.Equal(Docs.PlainTextWithTables(baseDoc), Docs.PlainTextWithTables(accepted));
+    }
+
+    /// <summary>
+    /// Cell MERGE (gridSpan) composes: a reviewer merges row 0's two cells horizontally (cell count 2 → 1,
+    /// gridSpan=2 — one paired-modified cell + one deleted cell) while another reviewer edits a different
+    /// row. Both land, no conflict; the removed cell renders with <c>w:cellDel</c> so reject restores the
+    /// base column count at the text level. (Before the shell hash, the vMerge/gridSpan-only variant with a
+    /// STABLE cell count read as EqualBlock and vanished with no conflict at all; before column composition,
+    /// the cell-count change forced the whole-table conflict fallback.)
+    /// </summary>
+    [Theory]
+    [InlineData(ConflictResolution.BaseWins)]
+    [InlineData(ConflictResolution.FirstReviewerWins)]
+    [InlineData(ConflictResolution.StackAll)]
+    public void GridSpan_merge_edit_composes(ConflictResolution policy)
+    {
+        var baseDoc = Base2x2();
+        // Alice merges row 0's two cells into one spanning cell (cell count 2 → 1, gridSpan=2).
+        var alice = IrTestDocuments.FromBodyXml(
+            Lead +
+            Table(
+                Row("<w:tc><w:tcPr><w:gridSpan w:val=\"2\"/></w:tcPr>" +
+                    "<w:p><w:r><w:t xml:space=\"preserve\">a one b two</w:t></w:r></w:p></w:tc>"),
+                Row(Cell("c three"), Cell("d four"))));
+        var bob = Variant2x2("a one", "b two", "c three", "d BOB");
+
+        Assert.Empty(Conflicts(baseDoc, policy, ("Alice", alice), ("Bob", bob)));
+
+        var merged = Consolidate(baseDoc, policy, ("Alice", alice), ("Bob", bob));
+        var accept = Accept(merged);
+        Assert.Contains("a one b two", accept);   // the merged spanning cell
+        Assert.Contains("d BOB", accept);         // Bob's edit
+        // Alice's second base cell is consumed by the merge: its standalone content appears only within
+        // the merged cell's text, not as a separate cell.
+        Assert.Equal(Docs.StructuralBody(baseDoc), Reject(merged));
     }
 
     // ------------------------------------------------------------------ helpers
