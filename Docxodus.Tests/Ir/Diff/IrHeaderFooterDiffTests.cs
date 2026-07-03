@@ -433,4 +433,12 @@ public class IrHeaderFooterDiffTests
         Assert.False(new DocxDiffSettings { CompareHeadersFooters = false }
             .ToIrDiffSettings().CompareHeadersFooters);
     }
+
+    [Fact]
+    public void Ops_settings_json_parses_compare_headers_footers()
+    {
+        Assert.True(Docxodus.Internal.DocxDiffOps.ParseSettings(null).CompareHeadersFooters);
+        Assert.False(Docxodus.Internal.DocxDiffOps
+            .ParseSettings("{\"compareHeadersFooters\":false}").CompareHeadersFooters);
+    }
 }
