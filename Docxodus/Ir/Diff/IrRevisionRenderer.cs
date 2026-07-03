@@ -114,7 +114,15 @@ internal static class IrRevisionRenderer
         // is a spurious revision regardless of granularity (the real textbox change is reported through the
         // nested TextboxDiffs). See the two-textbox test.
         if (settings.RevisionGranularity == RevisionGranularity.WmlComparerCompatible)
+        {
             revisions.RemoveAll(IsSectionBreakZeroWidth);
+
+            // Block-scope FormatChanged exclusion (block-format-change family, 2026-07-03): the compatible
+            // granularity is defined as the ORACLE's revision set, and WmlComparer cannot produce
+            // paragraph/table/section-scope format revisions — so the compatible projection reports none,
+            // keeping count parity by construction (the hdr/ftr precedent). Fine mode reports them.
+            revisions.RemoveAll(r => r.FormatChange is { } fc && fc.Scope != IrFormatChangeScope.Run);
+        }
 
         return IrNodeList.From(revisions);
     }
@@ -538,6 +546,11 @@ internal static class IrRevisionRenderer
 
         if (op.TokenDiff is { } tokenDiff)
         {
+            // Block-format-change family (2026-07-03): a Modified paragraph whose pPr ALSO changed reports
+            // the Paragraph-scope FormatChanged first, then its token-level revisions (mirrors the markup
+            // renderer stamping w:pPrChange on the modified paragraph).
+            EmitParagraphScopeFormatChanged(op, ctx, sink);
+
             var leftTokens = ParagraphTokens(op.LeftAnchor, ctx.Left, ctx.Settings);
             var rightTokens = ParagraphTokens(op.RightAnchor, ctx.Right, ctx.Settings);
             RenderTokenOps(tokenDiff, leftTokens, rightTokens, op.LeftAnchor, op.RightAnchor, ctx, sink);
@@ -1216,6 +1229,12 @@ internal static class IrRevisionRenderer
         var leftTokens = ParagraphTokens(op.LeftAnchor, ctx.Left, ctx.Settings);
         var rightTokens = ParagraphTokens(op.RightAnchor, ctx.Right, ctx.Settings);
 
+        // Block-format-change family (2026-07-03): a pPr delta reports as ONE Paragraph-scope
+        // FormatChanged revision (w:pPrChange-grade), emitted BEFORE the run-level pairs and even for an
+        // empty paragraph (a blank line whose alignment changed still reports). Excluded in
+        // WmlComparerCompatible mode by the scope filter in Render.
+        bool paraEmitted = EmitParagraphScopeFormatChanged(op, ctx, sink);
+
         // Non-paragraph FormatOnly (no tokens on either side): nothing describable at token grain.
         if (leftTokens.Count == 0 && rightTokens.Count == 0)
             return;
@@ -1254,8 +1273,9 @@ internal static class IrRevisionRenderer
             // Equal token counts but every paired position is modeled-format-equal: the block-level
             // FormatOnly delta lives in UNMODELED rPr the token surface cannot describe (e.g. w:shd under
             // ModeledOnly). Still report the change as one whole-block FormatChanged with empty details, so
-            // a FormatOnly op never silently vanishes from the revisions surface.
-            if (!emittedAny)
+            // a FormatOnly op never silently vanishes from the revisions surface — unless the Paragraph-scope
+            // revision above already represents this op.
+            if (!emittedAny && !paraEmitted)
                 EmitWholeBlockFormatChanged(op, leftTokens, rightTokens, ctx, sink);
 
             return;
@@ -1264,6 +1284,47 @@ internal static class IrRevisionRenderer
         // Fallback: counts differ (run-boundary word-split). One whole-block FormatChanged with details
         // from the first divergent position under positional scan of the shorter length.
         EmitWholeBlockFormatChanged(op, leftTokens, rightTokens, ctx, sink);
+    }
+
+    /// <summary>
+    /// True when a paired paragraph op's PARAGRAPH formats differ under the settings' policy: ModeledOnly
+    /// compares the modeled <see cref="IrModeledFormat.ParaKey"/>s (the delta a consumer-grade report can
+    /// describe); Full compares the full <see cref="IrParaFormat"/> record including the unmodeled digest
+    /// (mirroring the stored-fingerprint grade). False when block-format tracking is off (the Consolidate
+    /// pipeline pin).
+    /// </summary>
+    private static bool ParaFormatDiffers(IrParagraph left, IrParagraph right, IrDiffSettings settings)
+    {
+        if (!settings.TrackBlockFormatChanges)
+            return false;
+        return settings.FormatComparison == IrFormatComparison.ModeledOnly
+            ? IrModeledFormat.ParaKey(left.Format) != IrModeledFormat.ParaKey(right.Format)
+            : !EqualityComparer<IrParaFormat?>.Default.Equals(left.Format, right.Format);
+    }
+
+    /// <summary>
+    /// Emit ONE Paragraph-scope FormatChanged revision for a paired-paragraph op whose pPr differs under
+    /// the policy (block-format-change family). Text = the right paragraph's full raw text (the
+    /// whole-block convention); details = the modeled paragraph property delta; both anchors carried.
+    /// Returns false (emitting nothing) for non-paragraph pairs, one-sided ops, or a format-equal pair.
+    /// </summary>
+    private static bool EmitParagraphScopeFormatChanged(IrEditOp op, in Context ctx, List<IrRevision> sink)
+    {
+        if (op.LeftAnchor is null || op.RightAnchor is null)
+            return false;
+        if (!ctx.Left.AnchorIndex.TryGetValue(op.LeftAnchor, out var lb) || lb is not IrParagraph lp)
+            return false;
+        if (!ctx.Right.AnchorIndex.TryGetValue(op.RightAnchor, out var rb) || rb is not IrParagraph rp)
+            return false;
+        if (!ParaFormatDiffers(lp, rp, ctx.Settings))
+            return false;
+
+        var rightTokens = ParagraphTokens(op.RightAnchor, ctx.Right, ctx.Settings);
+        sink.Add(new IrRevision(IrRevisionType.FormatChanged,
+            RawText(rightTokens, 0, rightTokens.Count), ctx.Author, ctx.Date,
+            FormatChange: IrModeledFormat.ParaFormatChangeDetails(lp.Format, rp.Format),
+            LeftAnchor: op.LeftAnchor, RightAnchor: op.RightAnchor));
+        return true;
     }
 
     /// <summary>

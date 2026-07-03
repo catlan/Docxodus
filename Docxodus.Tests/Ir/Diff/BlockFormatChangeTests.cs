@@ -43,124 +43,172 @@ public class BlockFormatChangeTests
         "<w:p><w:pPr><w:jc w:val=\"center\"/></w:pPr><w:r><w:t>Same text here.</w:t></w:r></w:p>");
 
     [Fact]
-    public void PPrOnly_ModeledOnly_is_invisible_and_untracked_right_apply_today()
+    public void PPrOnly_change_is_tracked_with_native_pPrChange()
     {
-        // Pin: BlockSignature is run-token-only, so a modeled pPr-only change classifies Unchanged.
-        Assert.Empty(DocxDiff.GetRevisions(PPrLeft, PPrRight, ModeledOnly));
+        // Phase 1 (flipped Phase 0 pin): a modeled pPr-only change is tracked under BOTH policies.
+        foreach (var settings in new[] { ModeledOnly, Full })
+        {
+            var result = DocxDiff.Compare(PPrLeft, PPrRight, settings);
+            var body = BodyOf(result);
 
-        var result = DocxDiff.Compare(PPrLeft, PPrRight, ModeledOnly);
-        var body = BodyOf(result);
-        Assert.Empty(body.Descendants(W + "pPrChange"));                                  // untracked
-        Assert.Equal("center", (string?)body.Descendants(W + "jc").Single().Attribute(W + "val")); // right applied
+            var pPrChange = body.Descendants(W + "pPrChange").Single();
+            Assert.Same(pPrChange, pPrChange.Parent!.Elements().Last());                  // last child of pPr
+            Assert.Equal(settings.AuthorForRevisions, (string?)pPrChange.Attribute(W + "author"));
+            Assert.NotNull(pPrChange.Attribute(W + "id"));
+            Assert.NotNull(pPrChange.Attribute(W + "date"));
+            var inner = pPrChange.Element(W + "pPr")!;
+            Assert.Null(inner.Element(W + "jc"));                                          // old = no jc
+            Assert.Empty(inner.Elements(W + "rPr"));                                       // CT_PPrBase: no mark rPr
+            Assert.Empty(inner.Elements(W + "sectPr"));                                    //   and no sectPr
 
-        // The soundness pin: reject does NOT restore the left pPr (right jc survives rejection).
-        var rejected = RevisionProcessor.RejectRevisions(result);
-        Assert.Equal("center", (string?)BodyOf(rejected).Descendants(W + "jc").Single().Attribute(W + "val"));
+            // Output carries the RIGHT pPr (accepted state)…
+            Assert.Equal("center",
+                (string?)pPrChange.Parent!.Element(W + "jc")?.Attribute(W + "val"));
+
+            // …accept ≡ right, and reject ≡ LEFT at the pPr level (the flipped soundness pin).
+            var accepted = RevisionProcessor.AcceptRevisions(result);
+            Assert.Equal("center", (string?)BodyOf(accepted).Descendants(W + "jc").Single().Attribute(W + "val"));
+            Assert.Empty(BodyOf(accepted).Descendants(W + "pPrChange"));
+            var rejected = RevisionProcessor.RejectRevisions(result);
+            Assert.Empty(BodyOf(rejected).Descendants(W + "jc"));
+            Assert.Empty(BodyOf(rejected).Descendants(W + "pPrChange"));
+        }
     }
 
     [Fact]
-    public void PPrOnly_Full_is_visible_but_untracked_today()
+    public void PPrOnly_Full_reports_a_FormatChanged_revision()
     {
-        // Pin: under Full the fingerprint flips → FormatOnly → ONE whole-block FormatChanged revision
-        // with EMPTY details (the delta is not describable at run-token grain).
         var revisions = DocxDiff.GetRevisions(PPrLeft, PPrRight, Full);
         var rev = Assert.Single(revisions);
         Assert.Equal(DocxDiffRevisionType.FormatChanged, rev.Type);
         Assert.NotNull(rev.FormatChange);
-        Assert.Empty(rev.FormatChange!.ChangedPropertyNames);
+    }
 
-        // But the markup is still an untracked right-apply: no pPrChange, reject ≠ left.
-        var result = DocxDiff.Compare(PPrLeft, PPrRight, Full);
+    [Fact]
+    public void PPrOnly_reports_paragraph_scope_FormatChanged_details()
+    {
+        var revisions = DocxDiff.GetRevisions(PPrLeft, PPrRight, ModeledOnly);
+        var rev = Assert.Single(revisions);
+        Assert.Equal(DocxDiffRevisionType.FormatChanged, rev.Type);
+        var fc = rev.FormatChange!;
+        Assert.Equal(DocxDiffFormatChangeScope.Paragraph, fc.Scope);
+        Assert.Equal(new[] { "justification" }, fc.ChangedPropertyNames);
+        Assert.Equal("Center", fc.NewProperties["justification"]);
+        Assert.False(fc.OldProperties.ContainsKey("justification"));
+        Assert.NotNull(rev.LeftAnchor);
+        Assert.NotNull(rev.RightAnchor);
+    }
+
+    [Fact]
+    public void NumberingOnly_change_reports_numId_in_details()
+    {
+        var left = IrTestDocuments.FromBodyXml(
+            "<w:p><w:pPr><w:numPr><w:ilvl w:val=\"0\"/><w:numId w:val=\"1\"/></w:numPr></w:pPr><w:r><w:t>Item text.</w:t></w:r></w:p>");
+        var right = IrTestDocuments.FromBodyXml(
+            "<w:p><w:pPr><w:numPr><w:ilvl w:val=\"0\"/><w:numId w:val=\"2\"/></w:numPr></w:pPr><w:r><w:t>Item text.</w:t></w:r></w:p>");
+        var rev = Assert.Single(DocxDiff.GetRevisions(left, right, ModeledOnly));
+        Assert.Equal(new[] { "numId" }, rev.FormatChange!.ChangedPropertyNames);
+        Assert.Equal("1", rev.FormatChange.OldProperties["numId"]);
+        Assert.Equal("2", rev.FormatChange.NewProperties["numId"]);
+    }
+
+    [Fact]
+    public void CompatibleMode_excludes_paragraph_scope_revisions()
+    {
+        // By-construction exclusion (the hdr/ftr precedent): the compatible granularity is defined as the
+        // ORACLE's revision set, and WmlComparer cannot produce block-scope format revisions.
+        var settings = new DocxDiffSettings { RevisionGranularity = DocxDiffRevisionGranularity.WmlComparerCompatible };
+        Assert.Empty(DocxDiff.GetRevisions(PPrLeft, PPrRight, settings));
+    }
+
+    [Fact]
+    public void RunLevel_FormatChanged_keeps_Run_scope()
+    {
+        var left = IrTestDocuments.FromBodyXml("<w:p><w:r><w:t>Same text here.</w:t></w:r></w:p>");
+        var right = IrTestDocuments.FromBodyXml(
+            "<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>Same text here.</w:t></w:r></w:p>");
+        var rev = Assert.Single(DocxDiff.GetRevisions(left, right, ModeledOnly));
+        Assert.Equal(DocxDiffFormatChangeScope.Run, rev.FormatChange!.Scope);
+        Assert.Contains("bold", rev.FormatChange.ChangedPropertyNames);
+    }
+
+    [Fact]
+    public void TextAndPPr_modify_reports_paragraph_scope_alongside_token_revisions()
+    {
+        var left = IrTestDocuments.FromBodyXml("<w:p><w:r><w:t>Old words here now.</w:t></w:r></w:p>");
+        var right = IrTestDocuments.FromBodyXml(
+            "<w:p><w:pPr><w:jc w:val=\"center\"/></w:pPr><w:r><w:t>New words here now.</w:t></w:r></w:p>");
+        var revisions = DocxDiff.GetRevisions(left, right, ModeledOnly);
+        var para = Assert.Single(revisions,
+            r => r.FormatChange is { } fc && fc.Scope == DocxDiffFormatChangeScope.Paragraph);
+        Assert.Equal(new[] { "justification" }, para.FormatChange!.ChangedPropertyNames);
+        Assert.Contains(revisions, r => r.Type == DocxDiffRevisionType.Inserted);
+        Assert.Contains(revisions, r => r.Type == DocxDiffRevisionType.Deleted);
+    }
+
+    [Fact]
+    public void PPrChange_on_right_paragraph_without_pPr()
+    {
+        // Right paragraph LOST its pPr (left was centered): a fresh pPr holds only the pPrChange, whose
+        // inner carries the OLD (left) jc; reject restores the centering.
+        var result = DocxDiff.Compare(PPrRight, PPrLeft, ModeledOnly);
         var body = BodyOf(result);
-        Assert.Empty(body.Descendants(W + "pPrChange"));
+        var pPrChange = body.Descendants(W + "pPrChange").Single();
+        Assert.Equal("center", (string?)pPrChange.Element(W + "pPr")!.Element(W + "jc")?.Attribute(W + "val"));
+        Assert.Null(pPrChange.Parent!.Element(W + "jc"));                                  // accepted state: no jc
+
         var rejected = RevisionProcessor.RejectRevisions(result);
         Assert.Equal("center", (string?)BodyOf(rejected).Descendants(W + "jc").Single().Attribute(W + "val"));
     }
 
-    // ------------------------------------------------------------------ trPr-only (w:trHeight)
-
-    private static string Table(string trPr, string tcPr, string tblPr = "<w:tblW w:w=\"0\" w:type=\"auto\"/>",
-                                string grid = "<w:gridCol w:w=\"4000\"/>") =>
-        $"<w:tbl><w:tblPr>{tblPr}</w:tblPr><w:tblGrid>{grid}</w:tblGrid>" +
-        $"<w:tr>{trPr}<w:tc><w:tcPr>{tcPr}</w:tcPr><w:p><w:r><w:t>Cell text</w:t></w:r></w:p></w:tc></w:tr></w:tbl>" +
-        "<w:p><w:r><w:t>After.</w:t></w:r></w:p>";
-
     [Fact]
-    public void TrPrOnly_is_untracked_right_apply_today()
+    public void TextAndPPr_modify_block_also_tracks_pPrChange()
     {
-        var left = IrTestDocuments.FromBodyXml(Table("<w:trPr><w:trHeight w:val=\"400\"/></w:trPr>", "<w:tcW w:w=\"4000\" w:type=\"dxa\"/>"));
-        var right = IrTestDocuments.FromBodyXml(Table("<w:trPr><w:trHeight w:val=\"800\"/></w:trPr>", "<w:tcW w:w=\"4000\" w:type=\"dxa\"/>"));
+        var left = IrTestDocuments.FromBodyXml("<w:p><w:r><w:t>Old words here now.</w:t></w:r></w:p>");
+        var right = IrTestDocuments.FromBodyXml(
+            "<w:p><w:pPr><w:jc w:val=\"center\"/></w:pPr><w:r><w:t>New words here now.</w:t></w:r></w:p>");
 
-        // Pin: FormatOnly (fingerprint-grade for non-paragraphs) but nothing describable → no revisions.
-        Assert.Empty(DocxDiff.GetRevisions(left, right, ModeledOnly));
-
-        // Pin: non-paragraph FormatOnly falls through to a verbatim right emit — no trPrChange, right trHeight.
         var result = DocxDiff.Compare(left, right, ModeledOnly);
         var body = BodyOf(result);
-        Assert.Empty(body.Descendants(W + "trPrChange"));
-        Assert.Equal("800", (string?)body.Descendants(W + "trHeight").Single().Attribute(W + "val"));
+        Assert.Single(body.Descendants(W + "pPrChange"));
+        Assert.NotEmpty(body.Descendants(W + "ins"));                                      // the text edit is there too
 
         var rejected = RevisionProcessor.RejectRevisions(result);
-        Assert.Equal("800", (string?)BodyOf(rejected).Descendants(W + "trHeight").Single().Attribute(W + "val")); // reject ≠ left
+        Assert.Empty(BodyOf(rejected).Descendants(W + "jc"));                              // left pPr restored
+        var accepted = RevisionProcessor.AcceptRevisions(result);
+        Assert.Equal("center", (string?)BodyOf(accepted).Descendants(W + "jc").Single().Attribute(W + "val"));
     }
 
-    // ------------------------------------------------------------------ tblPr-only (w:tblBorders)
-
     [Fact]
-    public void TblPrOnly_is_untracked_right_apply_today()
+    public void MarkRPr_change_is_tracked_via_pPr_rPr_rPrChange()
     {
-        var borders = "<w:tblW w:w=\"0\" w:type=\"auto\"/><w:tblBorders><w:top w:val=\"single\" w:sz=\"4\"/></w:tblBorders>";
-        var left = IrTestDocuments.FromBodyXml(Table("", "<w:tcW w:w=\"4000\" w:type=\"dxa\"/>"));
-        var right = IrTestDocuments.FromBodyXml(Table("", "<w:tcW w:w=\"4000\" w:type=\"dxa\"/>", tblPr: borders));
+        // Only the paragraph-MARK rPr differs (bold pilcrow) — schema puts this OUTSIDE pPrChange:
+        // it tracks as w:pPr/w:rPr/w:rPrChange. Detected under Full (mark rPr rides the unmodeled digest).
+        var left = IrTestDocuments.FromBodyXml("<w:p><w:r><w:t>Same text here.</w:t></w:r></w:p>");
+        var right = IrTestDocuments.FromBodyXml(
+            "<w:p><w:pPr><w:rPr><w:b/></w:rPr></w:pPr><w:r><w:t>Same text here.</w:t></w:r></w:p>");
 
-        Assert.Empty(DocxDiff.GetRevisions(left, right, ModeledOnly));
-
-        var result = DocxDiff.Compare(left, right, ModeledOnly);
+        var result = DocxDiff.Compare(left, right, Full);
         var body = BodyOf(result);
-        Assert.Empty(body.Descendants(W + "tblPrChange"));
-        Assert.Single(body.Descendants(W + "tblBorders"));                                 // right applied
+        Assert.Empty(body.Descendants(W + "pPrChange"));                                   // no property child changed
+        var markChange = body.Descendants(W + "pPr").Elements(W + "rPr").Elements(W + "rPrChange").Single();
+        Assert.Empty(markChange.Element(W + "rPr")!.Elements());                           // old mark = empty
 
         var rejected = RevisionProcessor.RejectRevisions(result);
-        Assert.Single(BodyOf(rejected).Descendants(W + "tblBorders"));                     // reject ≠ left
+        Assert.Empty(BodyOf(rejected).Descendants(W + "pPr").Elements(W + "rPr").Elements(W + "b"));
+        var accepted = RevisionProcessor.AcceptRevisions(result);
+        Assert.Single(BodyOf(accepted).Descendants(W + "pPr").Elements(W + "rPr").Elements(W + "b"));
     }
 
-    // ------------------------------------------------------------------ tblGrid-only (column width)
-
     [Fact]
-    public void TblGridOnly_is_untracked_right_apply_today()
+    public void UnmodeledOnly_pPr_delta_stays_untracked_under_ModeledOnly()
     {
-        var left = IrTestDocuments.FromBodyXml(Table("", "<w:tcW w:w=\"4000\" w:type=\"dxa\"/>"));
-        var right = IrTestDocuments.FromBodyXml(Table("", "<w:tcW w:w=\"4000\" w:type=\"dxa\"/>", grid: "<w:gridCol w:w=\"6000\"/>"));
-
-        Assert.Empty(DocxDiff.GetRevisions(left, right, ModeledOnly));
-
-        var result = DocxDiff.Compare(left, right, ModeledOnly);
-        var body = BodyOf(result);
-        Assert.Empty(body.Descendants(W + "tblGridChange"));
-        Assert.Equal("6000", (string?)body.Descendants(W + "gridCol").Single().Attribute(W + "w"));
-
-        var rejected = RevisionProcessor.RejectRevisions(result);
-        Assert.Equal("6000", (string?)BodyOf(rejected).Descendants(W + "gridCol").Single().Attribute(W + "w"));
-    }
-
-    // ------------------------------------------------------------------ tcPr-only (w:shd)
-
-    [Fact]
-    public void TcPrOnly_is_untracked_right_apply_today()
-    {
-        var left = IrTestDocuments.FromBodyXml(Table("", "<w:tcW w:w=\"4000\" w:type=\"dxa\"/>"));
-        var right = IrTestDocuments.FromBodyXml(Table("",
-            "<w:tcW w:w=\"4000\" w:type=\"dxa\"/><w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"FFFF00\"/>"));
-
-        // Pin: the shell digest participates in cell ContentHash → the table pair is Modified,
-        // but the right tcPr is copied verbatim with no tcPrChange (the #250-noted gap).
-        var result = DocxDiff.Compare(left, right, ModeledOnly);
-        var body = BodyOf(result);
-        Assert.Empty(body.Descendants(W + "tcPrChange"));
-        Assert.Single(body.Descendants(W + "tc").Elements(W + "tcPr").Elements(W + "shd"));
-
-        var rejected = RevisionProcessor.RejectRevisions(result);
-        Assert.Single(BodyOf(rejected).Descendants(W + "tc").Elements(W + "tcPr").Elements(W + "shd")); // reject ≠ left
+        // The documented blind spot survives Phase 1: paragraph shading is unmodeled → no markup, right-apply.
+        var right = IrTestDocuments.FromBodyXml(
+            "<w:p><w:pPr><w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"FFFF00\"/></w:pPr><w:r><w:t>Same text here.</w:t></w:r></w:p>");
+        var result = DocxDiff.Compare(PPrLeft, right, ModeledOnly);
+        Assert.Empty(BodyOf(result).Descendants(W + "pPrChange"));
+        Assert.Single(BodyOf(result).Descendants(W + "shd"));
     }
 
     // ------------------------------------------------------------------ trailing sectPr-only (w:pgSz)
@@ -186,6 +234,143 @@ public class BlockFormatChangeTests
         var accepted = RevisionProcessor.AcceptRevisions(result);
         var acceptedPgSz = BodyOf(accepted).Elements(W + "sectPr").Single().Element(W + "pgSz")!;
         Assert.Equal("12240", (string?)acceptedPgSz.Attribute(W + "w"));                    // accept ≠ right
+    }
+
+    // ------------------------------------------------------------------ direct numbering is modeled (Phase 1)
+
+    [Fact]
+    public void MapParaFormat_models_direct_numbering()
+    {
+        var pPr = XElement.Parse(
+            $"<w:pPr xmlns:w=\"{W}\"><w:numPr><w:ilvl w:val=\"2\"/><w:numId w:val=\"5\"/></w:numPr></w:pPr>");
+        var f = IrReader.MapParaFormat(pPr);
+        Assert.Equal(5, f.NumId);
+        Assert.Equal(2, f.Ilvl);
+
+        var empty = IrReader.MapParaFormat(XElement.Parse($"<w:pPr xmlns:w=\"{W}\"/>"));
+        Assert.Null(empty.NumId);
+        Assert.Null(empty.Ilvl);
+
+        // numPr is CONSUMED by the modeled fields — it no longer rides the unmodeled digest.
+        Assert.Equal(empty.UnmodeledDigest, f.UnmodeledDigest);
+    }
+
+    [Fact]
+    public void FingerprintParaFormat_distinguishes_direct_numbering_via_modeled_fields()
+    {
+        var a = IrReader.MapParaFormat(XElement.Parse(
+            $"<w:pPr xmlns:w=\"{W}\"><w:numPr><w:numId w:val=\"5\"/></w:numPr></w:pPr>"));
+        var b = IrReader.MapParaFormat(XElement.Parse(
+            $"<w:pPr xmlns:w=\"{W}\"><w:numPr><w:numId w:val=\"7\"/></w:numPr></w:pPr>"));
+        Assert.NotEqual(IrHasher.FingerprintParaFormat(a), IrHasher.FingerprintParaFormat(b));
+        Assert.Equal(a.UnmodeledDigest, b.UnmodeledDigest);   // the difference is modeled, not digest-borne
+    }
+
+    // ------------------------------------------------------------------ consume-side: inline sectPr survives reject
+
+    [Fact]
+    public void RejectRevisions_preserves_inline_sectPr_when_rejecting_a_pPrChange()
+    {
+        // Word semantics: an inline w:sectPr is OUTSIDE pPrChange scope (CT_PPrBase excludes it), so
+        // rejecting the paragraph-property change must NOT delete the section break. Latent consume-side
+        // bug found by this campaign — see docs/ooxml_corner_cases.md.
+        var doc = IrTestDocuments.FromBodyXml(
+            "<w:p><w:pPr><w:jc w:val=\"center\"/>" +
+            "<w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/></w:sectPr>" +
+            "<w:pPrChange w:id=\"1\" w:author=\"a\" w:date=\"2026-01-01T00:00:00Z\"><w:pPr/></w:pPrChange></w:pPr>" +
+            "<w:r><w:t>Section-final paragraph.</w:t></w:r></w:p>" +
+            "<w:p><w:r><w:t>Next section.</w:t></w:r></w:p>" +
+            "<w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/></w:sectPr>");
+
+        var rejected = RevisionProcessor.RejectRevisions(doc);
+        var body = BodyOf(rejected);
+        var firstPara = body.Elements(W + "p").First();
+        Assert.Single(firstPara.Descendants(W + "sectPr"));                        // the section break survives
+        Assert.Empty(body.Descendants(W + "jc"));                                  // the pPr change is rejected
+        Assert.Empty(body.Descendants(W + "pPrChange"));
+    }
+
+    // ------------------------------------------------------------------ detection at block pairing (Phase 1)
+
+    private static readonly IrReaderOptions NoSources = new() { RetainSources = false };
+
+    private static IrDocument Ir(WmlDocument doc) => IrReader.Read(doc, NoSources);
+
+    [Fact]
+    public void PPrOnly_modeled_change_classifies_FormatOnly_under_both_policies()
+    {
+        foreach (var cmp in new[] { IrFormatComparison.ModeledOnly, IrFormatComparison.Full })
+        {
+            var a = IrBlockAligner.Align(Ir(PPrLeft), Ir(PPrRight), new IrDiffSettings { FormatComparison = cmp });
+            Assert.Equal(IrAlignmentKind.FormatOnly, a.Entries.Single().Kind);
+        }
+    }
+
+    [Fact]
+    public void NumberingOnly_change_classifies_FormatOnly_under_ModeledOnly()
+    {
+        var left = Ir(IrTestDocuments.FromBodyXml(
+            "<w:p><w:pPr><w:numPr><w:ilvl w:val=\"0\"/><w:numId w:val=\"1\"/></w:numPr></w:pPr><w:r><w:t>Item text.</w:t></w:r></w:p>"));
+        var right = Ir(IrTestDocuments.FromBodyXml(
+            "<w:p><w:pPr><w:numPr><w:ilvl w:val=\"0\"/><w:numId w:val=\"2\"/></w:numPr></w:pPr><w:r><w:t>Item text.</w:t></w:r></w:p>"));
+        var a = IrBlockAligner.Align(left, right, new IrDiffSettings());
+        Assert.Equal(IrAlignmentKind.FormatOnly, a.Entries.Single().Kind);
+    }
+
+    [Fact]
+    public void UnmodeledOnly_pPr_change_stays_Unchanged_under_ModeledOnly()
+    {
+        // The documented ModeledOnly blind spot, pPr edition: paragraph shading is unmodeled, so the
+        // delta reads Unchanged under the default (untracked right-apply) and FormatOnly under Full.
+        var left = Ir(PPrLeft);
+        var right = Ir(IrTestDocuments.FromBodyXml(
+            "<w:p><w:pPr><w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"FFFF00\"/></w:pPr><w:r><w:t>Same text here.</w:t></w:r></w:p>"));
+
+        var modeled = IrBlockAligner.Align(left, right, new IrDiffSettings());
+        Assert.Equal(IrAlignmentKind.Unchanged, modeled.Entries.Single().Kind);
+
+        var full = IrBlockAligner.Align(left, right, new IrDiffSettings { FormatComparison = IrFormatComparison.Full });
+        Assert.Equal(IrAlignmentKind.FormatOnly, full.Entries.Single().Kind);
+    }
+
+    [Fact]
+    public void TrackBlockFormatChanges_off_restores_Unchanged_classification()
+    {
+        var a = IrBlockAligner.Align(Ir(PPrLeft), Ir(PPrRight),
+            new IrDiffSettings { TrackBlockFormatChanges = false });
+        Assert.Equal(IrAlignmentKind.Unchanged, a.Entries.Single().Kind);
+    }
+
+    [Fact]
+    public void StyleDefinition_only_difference_with_identical_direct_pPr_stays_Unchanged()
+    {
+        // Detection uses DIRECT pPr facts: when both paragraphs carry the same pStyle and the DIFFERENCE
+        // lives in the style definitions part, no pPrChange-describable delta exists → Unchanged.
+        const string body = "<w:p><w:pPr><w:pStyle w:val=\"Quote\"/></w:pPr><w:r><w:t>Styled text.</w:t></w:r></w:p>";
+        const string stylesA =
+            "<w:style w:type=\"paragraph\" w:styleId=\"Quote\"><w:name w:val=\"Quote\"/><w:pPr><w:jc w:val=\"left\"/></w:pPr></w:style>";
+        const string stylesB =
+            "<w:style w:type=\"paragraph\" w:styleId=\"Quote\"><w:name w:val=\"Quote\"/><w:pPr><w:jc w:val=\"center\"/></w:pPr></w:style>";
+        var left = Ir(IrTestDocuments.FromBodyAndStylesXml(body, stylesA));
+        var right = Ir(IrTestDocuments.FromBodyAndStylesXml(body, stylesB));
+        var a = IrBlockAligner.Align(left, right, new IrDiffSettings());
+        Assert.Equal(IrAlignmentKind.Unchanged, a.Entries.Single().Kind);
+    }
+
+    [Fact]
+    public void Consolidate_ignores_block_format_changes_v1_ceiling()
+    {
+        // Pinned v1 ceiling (the CompareHeadersFooters precedent): the composite merger forces
+        // TrackBlockFormatChanges off for its per-reviewer diffs, so a reviewer's pPr-only edit is
+        // ignored by Consolidate — no pPrChange, base pPr preserved, no conflict recorded.
+        var baseDoc = PPrLeft;
+        var reviewer = new DocxDiffReviewer { Document = PPrRight, Author = "Reviewer A" };
+
+        var merged = DocxDiff.Consolidate(baseDoc, new[] { reviewer });
+        var body = BodyOf(merged);
+        Assert.Empty(body.Descendants(W + "pPrChange"));
+        Assert.Empty(body.Descendants(W + "jc"));            // base (no jc) wins; reviewer's centering ignored
+        Assert.Empty(DocxDiff.GetConflicts(baseDoc, new[] { reviewer }));
     }
 
     // ------------------------------------------------------------------ the WmlComparer oracle

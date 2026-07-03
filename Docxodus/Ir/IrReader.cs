@@ -48,7 +48,7 @@ internal static class IrReader
     private static readonly HashSet<XName> PPrConsumed = new()
     {
         W + "pStyle", W + "jc", W + "ind", W + "spacing", W + "outlineLvl",
-        W + "keepNext", W + "keepLines", W + "pageBreakBefore",
+        W + "keepNext", W + "keepLines", W + "pageBreakBefore", W + "numPr",
     };
 
     // The always-consumed rPr children. w:vertAlign is consumed conditionally (only when it maps
@@ -1606,11 +1606,16 @@ internal static class IrReader
         bool? keepLines = Toggle(pPr.Element(W + "keepLines"));
         bool? pageBreakBefore = Toggle(pPr.Element(W + "pageBreakBefore"));
 
+        // Direct numbering facts (block-format-change family, 2026-07-03): numId/ilvl are MODELED
+        // so a diff-time modeled-only comparison can detect a list-membership change (w:pPrChange).
+        // Distinct from IrListInfo, which resolves through the numbering registry and styles —
+        // these are the raw pPr bytes a pPrChange can describe.
+        var numPr = pPr.Element(W + "numPr");
+        int? numId = IntAttr(numPr?.Element(W + "numId"), W + "val");
+        int? ilvl = IntAttr(numPr?.Element(W + "ilvl"), W + "val");
+
         // Unmodeled leftovers: every pPr child not consumed by a modeled field above.
-        // numPr is read for the IrListInfo facts but is intentionally NOT in PPrConsumed, so it
-        // stays in this digest: IrListInfo is not hashed, and numPr has always ridden in the
-        // unmodeled digest — keeping it here makes FormatFingerprint byte-identical across M1.3
-        // resolution. w:rPr (mark props) and mid-doc w:sectPr stay too.
+        // w:rPr (mark props) and mid-doc w:sectPr stay in the digest.
         var digest = UnmodeledDigest(pPr, PPrConsumed);
 
         var format = new IrParaFormat
@@ -1627,6 +1632,8 @@ internal static class IrReader
             KeepNext = keepNext,
             KeepLines = keepLines,
             PageBreakBefore = pageBreakBefore,
+            NumId = numId,
+            Ilvl = ilvl,
             UnmodeledDigest = digest,
         };
         return format;

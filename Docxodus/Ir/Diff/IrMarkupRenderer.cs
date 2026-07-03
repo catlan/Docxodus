@@ -2422,6 +2422,10 @@ internal static class IrMarkupRenderer
 
         var dest = StripUnids(new XElement(src));
         state.RegisterMediaReferences(dest);
+        // A moved paragraph whose pPr also changed tracks the property change at the DESTINATION
+        // (Word's own shape: moveTo content + pPrChange). Source/reject keeps the left paragraph verbatim.
+        if (SourceElement(op.LeftAnchor, state.Left) is { } leftMovedPara && leftMovedPara.Name == W.p)
+            ApplyBlockFormatChanges(dest, leftMovedPara, src, state);
         MarkWholeParagraphAs(dest, RevKind.MoveTo, state);
         BracketParagraphWithMoveRange(dest, isFrom: false, moveName, state);
         sink.Add(dest);
@@ -2447,6 +2451,7 @@ internal static class IrMarkupRenderer
         var rightPPr = rightPara.Element(W.pPr);
         if (rightPPr != null)
             newPara.Add(StripUnids(new XElement(rightPPr)));
+        ApplyBlockFormatChanges(newPara, leftPara, rightPara, state);
 
         var content = new List<XElement>();
         foreach (var tokenOp in tokenDiff.Ops)
@@ -2746,6 +2751,7 @@ internal static class IrMarkupRenderer
         var rightPPr = rightPara.Element(W.pPr);
         if (rightPPr != null)
             newPara.Add(StripUnids(new XElement(rightPPr)));
+        ApplyBlockFormatChanges(newPara, leftPara, rightPara, state);
 
         int cursor = 0;
         foreach (var child in rightPara.Elements().Where(e => e.Name != W.pPr))
@@ -2922,6 +2928,7 @@ internal static class IrMarkupRenderer
         var rightPPr = rightPara.Element(W.pPr);
         if (rightPPr != null)
             newPara.Add(StripUnids(new XElement(rightPPr)));
+        ApplyBlockFormatChanges(newPara, leftPara, rightPara, state);
 
         newPara.Add(BuildTokenOpContent(tokenDiff, leftTokens, rightTokens, leftRuns, rightRuns, state));
         sink.Add(newPara);
@@ -3287,6 +3294,96 @@ internal static class IrMarkupRenderer
         // The inner rPr is the OLD properties; an absent/empty old rPr is encoded as an empty w:rPr.
         var inner = oldRPr != null ? StripUnids(new XElement(W.rPr, oldRPr.Attributes(), oldRPr.Elements())) : new XElement(W.rPr);
         rPr.Add(new XElement(W.rPrChange, state.RevisionAttributes(), inner));
+    }
+
+    /// <summary>
+    /// Stamp native PARAGRAPH-property revision markup (block-format-change family, 2026-07-03) on an
+    /// emitted right-sourced paragraph: a <c>w:pPrChange</c> as the LAST child of the paragraph's pPr when
+    /// the pPr differs under the format-comparison policy (inner = the LEFT pPr minus <c>w:rPr</c>/
+    /// <c>w:sectPr</c>/<c>w:pPrChange</c> — the CT_PPrBase constraint: the mark rPr and section props are
+    /// outside pPrChange scope by schema), and a <c>w:pPr/w:rPr/w:rPrChange</c> when the paragraph-MARK
+    /// rPr differs canonically (inner = the LEFT mark rPr). Accept keeps the right properties (markers
+    /// drop); reject restores the left (RevisionProcessor swaps the inner back, carrying the current mark
+    /// rPr and inline sectPr). No-op when <see cref="IrDiffSettings.TrackBlockFormatChanges"/> is off —
+    /// the Consolidate-pipeline pin.
+    /// </summary>
+    private static void ApplyBlockFormatChanges(XElement newPara, XElement leftPara, XElement rightPara, RenderState state)
+    {
+        if (!state.Settings.TrackBlockFormatChanges)
+            return;
+
+        var leftPPr = leftPara.Element(W.pPr);
+        var rightPPr = rightPara.Element(W.pPr);
+
+        // Policy-gated pPr delta: ModeledOnly compares the modeled ParaKey (the delta a consumer-grade
+        // report can describe; unmodeled-only deltas stay untracked — the documented rPr-parallel blind
+        // spot); Full compares canonically (unid/rsid-stripped, rPr/sectPr/pPrChange excluded).
+        bool pPrDiffers = state.Settings.FormatComparison == IrFormatComparison.ModeledOnly
+            ? IrModeledFormat.ParaKey(IrReader.MapParaFormat(leftPPr)) !=
+              IrModeledFormat.ParaKey(IrReader.MapParaFormat(rightPPr))
+            : !IrHasher.CanonicalHash(PPrForCompare(leftPPr)).Equals(IrHasher.CanonicalHash(PPrForCompare(rightPPr)));
+
+        // The paragraph-MARK rPr is outside pPrChange by schema; Word tracks it as w:pPr/w:rPr/w:rPrChange.
+        // Compared canonically under both policies (the mark has no token to carry a run-level rPrChange).
+        bool markDiffers = !IrHasher.CanonicalHash(MarkRPrForCompare(leftPPr))
+            .Equals(IrHasher.CanonicalHash(MarkRPrForCompare(rightPPr)));
+
+        if (!pPrDiffers && !markDiffers)
+            return;
+
+        var pPr = newPara.Element(W.pPr);
+        if (pPr == null)
+        {
+            pPr = new XElement(W.pPr);
+            newPara.AddFirst(pPr);
+        }
+
+        if (markDiffers)
+        {
+            var markRPr = pPr.Element(W.rPr);
+            if (markRPr == null)
+            {
+                markRPr = new XElement(W.rPr);
+                // Schema position: the mark rPr follows every pPr property child, before sectPr/pPrChange.
+                var before = pPr.Elements().FirstOrDefault(e => e.Name == W.sectPr || e.Name == W.pPrChange);
+                if (before != null) before.AddBeforeSelf(markRPr);
+                else pPr.Add(markRPr);
+            }
+            markRPr.Elements(W.rPrChange).Remove();
+            var leftMark = leftPPr?.Element(W.rPr);
+            var markInner = leftMark != null
+                ? StripUnids(new XElement(W.rPr, leftMark.Attributes(),
+                      leftMark.Elements().Where(e => e.Name != W.rPrChange)))
+                : new XElement(W.rPr);
+            markRPr.Add(new XElement(W.rPrChange, state.RevisionAttributes(), markInner));
+        }
+
+        if (pPrDiffers)
+        {
+            var inner = leftPPr != null
+                ? StripUnids(new XElement(W.pPr, leftPPr.Attributes(),
+                      leftPPr.Elements().Where(e => e.Name != W.rPr && e.Name != W.sectPr && e.Name != W.pPrChange)))
+                : new XElement(W.pPr);
+            pPr.Elements(W.pPrChange).Remove();
+            pPr.Add(new XElement(W.pPrChange, state.RevisionAttributes(), inner));   // last child of pPr
+        }
+    }
+
+    /// <summary>The pPrChange-comparable projection of a pPr: its property children only (no mark rPr, no
+    /// inline sectPr, no pPrChange marker); a null pPr compares as an EMPTY pPr (no direct properties).</summary>
+    private static XElement PPrForCompare(XElement? pPr) =>
+        pPr == null
+            ? new XElement(W.pPr)
+            : new XElement(W.pPr, pPr.Attributes(),
+                  pPr.Elements().Where(e => e.Name != W.rPr && e.Name != W.sectPr && e.Name != W.pPrChange));
+
+    /// <summary>The paragraph-mark rPr of a pPr, minus any rPrChange marker; null/absent compares as empty.</summary>
+    private static XElement MarkRPrForCompare(XElement? pPr)
+    {
+        var rPr = pPr?.Element(W.rPr);
+        return rPr == null
+            ? new XElement(W.rPr)
+            : new XElement(W.rPr, rPr.Attributes(), rPr.Elements().Where(e => e.Name != W.rPrChange));
     }
 
     // ----------------------------------------------------------------- helpers

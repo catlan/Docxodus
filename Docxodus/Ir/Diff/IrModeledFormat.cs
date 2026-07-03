@@ -58,6 +58,34 @@ internal static class IrModeledFormat
     }
 
     /// <summary>
+    /// Modeled-only equality key for a PARAGRAPH format (block-format-change family, 2026-07-03):
+    /// every modeled <see cref="IrParaFormat"/> field, framed like <see cref="RunKey"/>; the unmodeled
+    /// digest is deliberately omitted. A null format maps to the empty key (a paragraph with no pPr).
+    /// </summary>
+    public static string ParaKey(IrParaFormat? f)
+    {
+        if (f is null)
+            return string.Empty;
+
+        var sb = new StringBuilder();
+        Append(sb, "PStyleId", f.StyleId);
+        Append(sb, "Jc", f.Justification?.ToString());
+        Append(sb, "IndL", f.IndentLeftTwips);
+        Append(sb, "IndR", f.IndentRightTwips);
+        Append(sb, "IndFL", f.IndentFirstLineTwips);
+        Append(sb, "SpB", f.SpacingBeforeTwips);
+        Append(sb, "SpA", f.SpacingAfterTwips);
+        Append(sb, "Line", RenderLineSpacing(f.LineSpacing));
+        Append(sb, "Outline", f.OutlineLevel);
+        Append(sb, "KeepNext", f.KeepNext);
+        Append(sb, "KeepLines", f.KeepLines);
+        Append(sb, "PBB", f.PageBreakBefore);
+        Append(sb, "NumId", f.NumId);
+        Append(sb, "Ilvl", f.Ilvl);
+        return sb.ToString();
+    }
+
+    /// <summary>
     /// True iff two run formats are equal for diff purposes under <paramref name="comparison"/>:
     /// modeled-field equality (ignoring the unmodeled digest) for
     /// <see cref="IrFormatComparison.ModeledOnly"/>, full record equality for
@@ -86,6 +114,16 @@ internal static class IrModeledFormat
             sb.Append(RunKey(t.Format));
             sb.Append('␞'); // record separator glyph
         }
+
+        // Block-format-change family (2026-07-03): the paragraph's own modeled format participates in
+        // the signature, so a pPr-only change (jc/indent/spacing/style/numbering) classifies FormatOnly
+        // instead of Unchanged. Gated so the composite (Consolidate) pipeline can pin it off (v1 ceiling).
+        if (settings.TrackBlockFormatChanges)
+        {
+            sb.Append('¶');
+            sb.Append(ParaKey(paragraph.Format));
+        }
+
         return sb.ToString();
     }
 
@@ -151,6 +189,65 @@ internal static class IrModeledFormat
         "verticalAlign", "font", "fontSize", "color", "highlight", "allCaps", "smallCaps", "hidden",
     };
 
+    /// <summary>
+    /// Project a PARAGRAPH format's modeled fields to a property dictionary (block-format-change family):
+    /// name → display value, omitting null fields — the paragraph analogue of
+    /// <see cref="ModeledProperties"/>. The unmodeled digest is never projected (undescribable).
+    /// </summary>
+    public static IReadOnlyDictionary<string, string> ModeledParaProperties(IrParaFormat? f)
+    {
+        var dict = new Dictionary<string, string>();
+        if (f is null)
+            return dict;
+
+        AddProp(dict, "style", f.StyleId);
+        AddProp(dict, "justification", f.Justification?.ToString());
+        AddInt(dict, "indentLeft", f.IndentLeftTwips);
+        AddInt(dict, "indentRight", f.IndentRightTwips);
+        AddInt(dict, "indentFirstLine", f.IndentFirstLineTwips);
+        AddInt(dict, "spacingBefore", f.SpacingBeforeTwips);
+        AddInt(dict, "spacingAfter", f.SpacingAfterTwips);
+        AddProp(dict, "lineSpacing", RenderLineSpacing(f.LineSpacing));
+        AddInt(dict, "outlineLevel", f.OutlineLevel);
+        AddBool(dict, "keepNext", f.KeepNext);
+        AddBool(dict, "keepLines", f.KeepLines);
+        AddBool(dict, "pageBreakBefore", f.PageBreakBefore);
+        AddInt(dict, "numId", f.NumId);
+        AddInt(dict, "numLevel", f.Ilvl);
+        return dict;
+    }
+
+    /// <summary>
+    /// Build the Paragraph-scope <see cref="IrFormatChangeDetails"/> for a (left, right) paragraph-format
+    /// pair: modeled property dictionaries + changed names in the fixed field order — the same
+    /// present-on-one-side-or-differing rule as <see cref="FormatChangeDetails"/>. An unmodeled-only delta
+    /// (detected under Full) yields empty changed names, mirroring the run-level empty-details convention.
+    /// </summary>
+    public static IrFormatChangeDetails ParaFormatChangeDetails(IrParaFormat? left, IrParaFormat? right)
+    {
+        var oldProps = ModeledParaProperties(left);
+        var newProps = ModeledParaProperties(right);
+
+        var changed = new List<string>();
+        foreach (var name in ModeledParaFieldOrder)
+        {
+            bool hasOld = oldProps.TryGetValue(name, out var oldVal);
+            bool hasNew = newProps.TryGetValue(name, out var newVal);
+            if (hasOld != hasNew || (hasOld && hasNew && oldVal != newVal))
+                changed.Add(name);
+        }
+
+        return new IrFormatChangeDetails(oldProps, newProps, changed, IrFormatChangeScope.Paragraph);
+    }
+
+    /// <summary>The fixed modeled paragraph-field property-name order (matches <see cref="ModeledParaProperties"/>).</summary>
+    private static readonly string[] ModeledParaFieldOrder =
+    {
+        "style", "justification", "indentLeft", "indentRight", "indentFirstLine",
+        "spacingBefore", "spacingAfter", "lineSpacing", "outlineLevel",
+        "keepNext", "keepLines", "pageBreakBefore", "numId", "numLevel",
+    };
+
     private static void AddProp(Dictionary<string, string> dict, string name, string? value)
     {
         if (value is not null)
@@ -197,5 +294,12 @@ internal static class IrModeledFormat
         if (u is null)
             return null;
         return u.ColorHex is null ? u.Kind.ToString() : $"{u.Kind}|{u.ColorHex}";
+    }
+
+    private static string? RenderLineSpacing(IrLineSpacing? ls)
+    {
+        if (ls is null)
+            return null;
+        return $"{ls.ValueTwips.ToString(CultureInfo.InvariantCulture)}|{ls.Rule}";
     }
 }

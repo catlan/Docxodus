@@ -133,6 +133,10 @@ namespace Docxodus
                         pPr = new XElement(W.pPr);
                     var new_pPr = new XElement(pPr); // clone it
                     new_pPr.Add(RejectRevisionsForPartTransform(element.Element(W.rPr)));
+                    // An inline w:sectPr is OUTSIDE pPrChange scope (the inner pPr is CT_PPrBase, which
+                    // excludes it) — Word keeps the section break when the property change is rejected.
+                    // Carry it over (after rPr: schema order is props < rPr < sectPr < pPrChange).
+                    new_pPr.Add(RejectRevisionsForPartTransform(element.Element(W.sectPr)));
                     return RejectRevisionsForPartTransform(new_pPr);
                 }
 
