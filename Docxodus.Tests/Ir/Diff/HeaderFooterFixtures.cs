@@ -103,9 +103,12 @@ internal static class HeaderFooterFixtures
         return sb.ToString();
     }
 
+    /// <summary>Each entry is a paragraph text — or, when it starts with <c>&lt;w:</c>, raw block XML
+    /// (a <c>w:tbl</c>, a pre-built <c>w:p</c>) emitted verbatim.</summary>
     private static string Paras(string[] texts) =>
-        string.Concat(texts.Select(t =>
-            $"<w:p><w:r><w:t xml:space=\"preserve\">{t}</w:t></w:r></w:p>"));
+        string.Concat(texts.Select(t => t.StartsWith("<w:", StringComparison.Ordinal)
+            ? t
+            : $"<w:p><w:r><w:t xml:space=\"preserve\">{t}</w:t></w:r></w:p>"));
 
     private static void WritePart(OpenXmlPart part, string xml)
     {

@@ -269,6 +269,90 @@ public class IrHeaderFooterDiffTests
         Assert.Null(script.HeaderFooterOps);
     }
 
+    // ------------------------------------------------------------------ revision renderer
+
+    private static IrNodeList<IrRevision> Revisions(
+        WmlDocument left, WmlDocument right, IrDiffSettings? settings = null)
+    {
+        settings ??= Default;
+        var irLeft = IrReader.Read(left);
+        var irRight = IrReader.Read(right);
+        var script = IrEditScriptBuilder.Build(irLeft, irRight, settings);
+        return IrRevisionRenderer.Render(script, irLeft, irRight, settings);
+    }
+
+    private static bool IsHeaderFooterAnchored(IrRevision r) =>
+        (r.LeftAnchor ?? r.RightAnchor) is { } a &&
+        (a.Contains(":hdr") || a.Contains(":ftr"));
+
+    [Fact]
+    public void Revisions_fine_mode_reports_header_revisions_after_body()
+    {
+        var left = HeaderFooterFixtures.Simple(new[] { "Body one" }, headerParas: new[] { "CONFIDENTIAL Draft 1" });
+        var right = HeaderFooterFixtures.Simple(new[] { "Body two" }, headerParas: new[] { "CONFIDENTIAL Draft 2" });
+
+        var revisions = Revisions(left, right);
+
+        var headerRevs = revisions.Where(IsHeaderFooterAnchored).ToList();
+        Assert.NotEmpty(headerRevs);
+        Assert.Contains(headerRevs, r =>
+            r.Type == IrRevisionType.Inserted && r.Text.Contains("2") &&
+            r.RightAnchor!.StartsWith("p:hdr1:"));
+        Assert.Contains(headerRevs, r =>
+            r.Type == IrRevisionType.Deleted && r.Text.Contains("1") &&
+            r.LeftAnchor!.StartsWith("p:hdr1:"));
+
+        // Header/footer revisions are appended AFTER body (and note) revisions.
+        int firstHeader = revisions.ToList().FindIndex(IsHeaderFooterAnchored);
+        Assert.All(revisions.Skip(firstHeader), r => Assert.True(IsHeaderFooterAnchored(r)));
+        Assert.True(firstHeader > 0, "expected body revisions before header revisions");
+    }
+
+    [Fact]
+    public void Revisions_footer_story_carries_ftr_anchors()
+    {
+        var left = HeaderFooterFixtures.Simple(new[] { "Body" }, footerParas: new[] { "Page footer old" });
+        var right = HeaderFooterFixtures.Simple(new[] { "Body" }, footerParas: new[] { "Page footer new" });
+
+        var revisions = Revisions(left, right);
+
+        Assert.Contains(revisions, r => r.RightAnchor?.StartsWith("p:ftr1:") == true);
+    }
+
+    [Fact]
+    public void Revisions_compatible_mode_excludes_header_footer_scopes()
+    {
+        var left = HeaderFooterFixtures.Simple(new[] { "Body one" }, headerParas: new[] { "Header v1" });
+        var right = HeaderFooterFixtures.Simple(new[] { "Body two" }, headerParas: new[] { "Header v2" });
+
+        var compat = Revisions(left, right,
+            new IrDiffSettings { RevisionGranularity = RevisionGranularity.WmlComparerCompatible });
+
+        Assert.NotEmpty(compat);                                    // the body edit still reports
+        Assert.DoesNotContain(compat, IsHeaderFooterAnchored);      // the oracle's set has no header revisions
+    }
+
+    [Fact]
+    public void Revisions_table_in_header_row_insert_resolves_row_text()
+    {
+        static string HeaderTable(params string[] rows) =>
+            "<w:tbl><w:tblPr><w:tblW w:w=\"5000\" w:type=\"auto\"/></w:tblPr>" +
+            "<w:tblGrid><w:gridCol w:w=\"5000\"/></w:tblGrid>" +
+            string.Concat(rows.Select(r =>
+                $"<w:tr><w:tc><w:tcPr><w:tcW w:w=\"5000\" w:type=\"auto\"/></w:tcPr>" +
+                $"<w:p><w:r><w:t xml:space=\"preserve\">{r}</w:t></w:r></w:p></w:tc></w:tr>")) +
+            "</w:tbl>";
+
+        var left = HeaderFooterFixtures.Simple(new[] { "Body" },
+            headerParas: new[] { HeaderTable("Alpha", "Beta"), "After table" });
+        var right = HeaderFooterFixtures.Simple(new[] { "Body" },
+            headerParas: new[] { HeaderTable("Alpha", "Beta", "Gamma"), "After table" });
+
+        var revisions = Revisions(left, right);
+
+        Assert.Contains(revisions, r => r.Type == IrRevisionType.Inserted && r.Text.Contains("Gamma"));
+    }
+
     // ------------------------------------------------------------------ edit-script JSON
 
     [Fact]
