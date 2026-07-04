@@ -122,8 +122,30 @@ internal static class IrModeledFormat
         {
             sb.Append('¶');
             sb.Append(ParaKey(paragraph.Format));
+            // A3: an inline (in-pPr) sectPr's modeled page setup participates too, so a mid-document
+            // sectPr-only change classifies FormatOnly instead of Unchanged under ModeledOnly.
+            sb.Append('§');
+            sb.Append(SectionKey(paragraph.InlineSectionFormat));
         }
 
+        return sb.ToString();
+    }
+
+    /// <summary>Modeled-only equality key for a SECTION format (block-format follow-up A3): the modeled
+    /// <see cref="IrSectionFormat"/> fields, framed like <see cref="ParaKey"/>; null maps to the empty key.</summary>
+    public static string SectionKey(IrSectionFormat? f)
+    {
+        if (f is null)
+            return string.Empty;
+        var sb = new StringBuilder();
+        Append(sb, "PgW", f.PageWidthTwips);
+        Append(sb, "PgH", f.PageHeightTwips);
+        Append(sb, "Land", f.Landscape);
+        Append(sb, "MT", f.MarginTopTwips);
+        Append(sb, "MB", f.MarginBottomTwips);
+        Append(sb, "ML", f.MarginLeftTwips);
+        Append(sb, "MR", f.MarginRightTwips);
+        Append(sb, "SType", f.SectionType);
         return sb.ToString();
     }
 

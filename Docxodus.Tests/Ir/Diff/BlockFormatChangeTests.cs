@@ -230,6 +230,36 @@ public class BlockFormatChangeTests
         "<w:p><w:r><w:t>Next.</w:t></w:r></w:p>";
 
     [Fact]
+    public void MidDoc_inline_sectPr_change_is_tracked_with_native_sectPrChange()
+    {
+        var left = IrTestDocuments.FromBodyXml(InlineSectBody.Replace("{S}", "<w:pgSz w:w=\"12240\" w:h=\"15840\"/>"));
+        var right = IrTestDocuments.FromBodyXml(InlineSectBody.Replace("{S}", "<w:pgSz w:w=\"15840\" w:h=\"12240\" w:orient=\"landscape\"/>"));
+
+        var result = DocxDiff.Compare(left, right, ModeledOnly);
+        var inlineSect = BodyOf(result).Elements(W + "p").First().Element(W + "pPr")!.Element(W + "sectPr")!;
+        var change = inlineSect.Element(W + "sectPrChange")!;
+        Assert.Same(change, inlineSect.Elements().Last());                                  // last child of the inline sectPr
+        Assert.Equal("12240", (string?)change.Element(W + "sectPr")!.Element(W + "pgSz")?.Attribute(W + "w")); // old
+        Assert.Equal("15840", (string?)inlineSect.Element(W + "pgSz")?.Attribute(W + "w"));                    // right applied
+
+        Assert.Equal("15840", InlinePgW(RevisionProcessor.AcceptRevisions(result)));
+        Assert.Equal("12240", InlinePgW(RevisionProcessor.RejectRevisions(result)));       // reject ≡ left
+
+        var rev = Assert.Single(DocxDiff.GetRevisions(left, right, ModeledOnly),
+            r => r.FormatChange is { } fc && fc.Scope == DocxDiffFormatChangeScope.Section);
+        Assert.Contains("pageWidth", rev.FormatChange!.ChangedPropertyNames);
+
+        using var ms = new MemoryStream(result.DocumentByteArray);
+        using var wd = WordprocessingDocument.Open(ms, false);
+        Assert.Empty(new DocumentFormat.OpenXml.Validation.OpenXmlValidator().Validate(wd)
+            .Where(e => e.ErrorType == DocumentFormat.OpenXml.Validation.ValidationErrorType.Schema)
+            .Select(e => e.Description));
+    }
+
+    private static string? InlinePgW(WmlDocument doc) =>
+        (string?)BodyOf(doc).Elements(W + "p").First().Element(W + "pPr")?.Element(W + "sectPr")?.Element(W + "pgSz")?.Attribute(W + "w");
+
+    [Fact]
     public void Inline_sectPr_props_participate_in_paragraph_fingerprint()
     {
         var opts = new IrReaderOptions { RetainSources = false };

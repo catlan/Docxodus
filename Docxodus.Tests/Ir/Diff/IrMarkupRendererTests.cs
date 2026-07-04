@@ -192,6 +192,10 @@ public class IrMarkupRendererTests
         {
             case IrParagraph p:
                 sink.Add("pf:" + IrModeledFormat.BlockSignature(p, settings));
+                // A3: an inline (in-pPr) sectPr's modeled page setup must round-trip too (accept≡right,
+                // reject≡left) — it is folded into the fingerprint but not the BlockSignature.
+                if (p.InlineSectionFormat is { } isf)
+                    sink.Add("psec:" + IrHasher.FingerprintSectionFormat(isf).ToHex());
                 break;
             case IrTable t:
                 // Include the SHELL digests (block-format-change family): tblPr/tblGrid are in the

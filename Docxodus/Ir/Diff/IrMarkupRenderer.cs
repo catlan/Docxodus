@@ -155,7 +155,7 @@ internal static class IrMarkupRenderer
                     var rightTrailingSectPr = wDocRight.MainDocumentPart?.GetXDocument().Root?
                         .Element(W.body)?.Elements(W.sectPr).LastOrDefault();
                     if (rightTrailingSectPr != null && SectPrPropsDiffer(trailingSectPr, rightTrailingSectPr))
-                        ApplySectPrChange(trailingSectPr, rightTrailingSectPr, state);
+                        ApplySectPrChange(trailingSectPr, trailingSectPr, rightTrailingSectPr, state);
                 }
 
                 bodyEl.Elements().Where(e => e.Name != W.sectPr).Remove();
@@ -3387,7 +3387,17 @@ internal static class IrMarkupRenderer
         bool markDiffers = !IrHasher.CanonicalHash(MarkRPrForCompare(leftPPr))
             .Equals(IrHasher.CanonicalHash(MarkRPrForCompare(rightPPr)));
 
-        if (!pPrDiffers && !markDiffers)
+        // Mid-document section-property change (A3): the emitted right pPr already carries the right inline
+        // w:sectPr (cloned above); when the left pPr also had one and their PROPERTIES differ, it is tracked
+        // as w:sectPrChange INSIDE that sectPr (NOT in the pPrChange inner — CT_PPrBase excludes sectPr). A
+        // one-sided inline sectPr (added/removed) is a structural change, not a property change — left as-is.
+        var leftInlineSect = leftPPr?.Element(W.sectPr);
+        var newPPrForSect = newPara.Element(W.pPr);
+        var rightInlineSect = newPPrForSect?.Element(W.sectPr);
+        bool sectDiffers = leftInlineSect != null && rightInlineSect != null
+            && SectPrPropsDiffer(leftInlineSect, rightInlineSect);
+
+        if (!pPrDiffers && !markDiffers && !sectDiffers)
             return;
 
         var pPr = newPara.Element(W.pPr);
@@ -3426,6 +3436,10 @@ internal static class IrMarkupRenderer
             pPr.Elements(W.pPrChange).Remove();
             pPr.Add(new XElement(W.pPrChange, state.RevisionAttributes(), inner));   // last child of pPr
         }
+
+        if (sectDiffers)
+            // output (rightInlineSect) currently holds the RIGHT props; old = leftInlineSect.
+            ApplySectPrChange(rightInlineSect!, leftInlineSect!, rightInlineSect!, state);
     }
 
     /// <summary>The pPrChange-comparable projection of a pPr: its property children only (no mark rPr, no
@@ -3588,15 +3602,21 @@ internal static class IrMarkupRenderer
     /// header/footer machinery). Accept drops the marker (right properties remain); reject restores the left
     /// properties while preserving the references (via the <see cref="RevisionProcessor"/> sectPrChange fix).
     /// </summary>
-    private static void ApplySectPrChange(XElement outputSectPr, XElement rightSectPr, RenderState state)
+    private static void ApplySectPrChange(XElement outputSectPr, XElement oldSectPr, XElement rightSectPr, RenderState state)
     {
+        // Snapshot BOTH the OLD (change-inner) props and the RIGHT (accepted) props BEFORE mutating output —
+        // `outputSectPr` may alias `oldSectPr` (the trailing case: output starts as the left clone) OR
+        // `rightSectPr` (the mid-doc inline case: output starts as the right clone), so reading either after
+        // the strip would be wrong.
         var inner = new XElement(W.sectPr);
-        foreach (var e in outputSectPr.Elements().Where(IsSectPrProp))
+        foreach (var e in oldSectPr.Elements().Where(IsSectPrProp))
             inner.Add(StripUnids(new XElement(e)));
+        var rightProps = rightSectPr.Elements().Where(IsSectPrProp)
+            .Select(e => StripUnids(new XElement(e))).ToList();
 
-        outputSectPr.Elements().Where(IsSectPrProp).Remove();   // strip left props (references stay)
-        foreach (var e in rightSectPr.Elements().Where(IsSectPrProp))
-            outputSectPr.Add(StripUnids(new XElement(e)));       // append right props after the references
+        outputSectPr.Elements().Where(IsSectPrProp).Remove();   // strip current props (references stay)
+        foreach (var e in rightProps)
+            outputSectPr.Add(e);                                 // apply the right (accepted) props after refs
         outputSectPr.Add(new XElement(W.sectPrChange, state.RevisionAttributes(), inner));   // last child
     }
 
