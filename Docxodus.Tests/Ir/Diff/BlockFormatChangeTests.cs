@@ -223,6 +223,80 @@ public class BlockFormatChangeTests
         Assert.Single(BodyOf(result).Descendants(W + "shd"));
     }
 
+    // ------------------------------------------------------------------ note / header pPrChange (follow-up A4)
+
+    private static XElement PartXml(WmlDocument doc, System.Func<MainDocumentPart, OpenXmlPart?> pick)
+    {
+        using var ms = new MemoryStream(doc.DocumentByteArray);
+        using var wd = WordprocessingDocument.Open(ms, false);
+        var part = pick(wd.MainDocumentPart!)!;
+        using var s = part.GetStream();
+        return XElement.Load(s);
+    }
+
+    [Fact]
+    public void Footnote_paragraph_pPr_change_is_tracked_with_pPrChange()
+    {
+        // A4: a changed footnote-definition paragraph already emits w:pPrChange (the note scope routes through
+        // the same RenderBlockOp dispatch as the body) — proven here, not a v1 ceiling.
+        const string body = "<w:p><w:r><w:t>Body text.</w:t></w:r></w:p>";
+        var left = IrTestDocuments.FromBodyXmlWithFootnoteParagraph(body, "<w:r><w:t>Footnote text.</w:t></w:r>");
+        var right = IrTestDocuments.FromBodyXmlWithFootnoteParagraph(body, "<w:pPr><w:jc w:val=\"center\"/></w:pPr><w:r><w:t>Footnote text.</w:t></w:r>");
+
+        var result = DocxDiff.Compare(left, right, ModeledOnly);
+        var fnXml = PartXml(result, m => m.FootnotesPart);
+        Assert.Single(fnXml.Descendants(W + "pPrChange"));
+
+        // Round-trips inside the footnotes part.
+        Assert.Single(PartXml(RevisionProcessor.AcceptRevisions(result), m => m.FootnotesPart).Descendants(W + "jc"));
+        Assert.Empty(PartXml(RevisionProcessor.RejectRevisions(result), m => m.FootnotesPart).Descendants(W + "jc"));
+
+        // Fine revisions report the Paragraph-scope change with a footnote anchor.
+        Assert.Contains(DocxDiff.GetRevisions(left, right, ModeledOnly), r =>
+            r.FormatChange is { } fc && fc.Scope == DocxDiffFormatChangeScope.Paragraph
+            && (r.LeftAnchor?.Contains(":fn") ?? false));
+    }
+
+    [Fact]
+    public void Header_paragraph_pPr_change_is_tracked_with_pPrChange()
+    {
+        // A4: a changed header-story paragraph already emits w:pPrChange (same shared dispatch).
+        const string body = "<w:p><w:r><w:t>Body.</w:t></w:r></w:p>";
+        var left = IrTestDocuments.FromBodyAndHeaderXml(body, "<w:p><w:r><w:t>HEADER</w:t></w:r></w:p>");
+        var right = IrTestDocuments.FromBodyAndHeaderXml(body, "<w:p><w:pPr><w:jc w:val=\"center\"/></w:pPr><w:r><w:t>HEADER</w:t></w:r></w:p>");
+
+        var result = DocxDiff.Compare(left, right, ModeledOnly);
+        var hdrXml = PartXml(result, m => m.HeaderParts.First());
+        Assert.Single(hdrXml.Descendants(W + "pPrChange"));
+        Assert.Single(PartXml(RevisionProcessor.AcceptRevisions(result), m => m.HeaderParts.First()).Descendants(W + "jc"));
+        Assert.Empty(PartXml(RevisionProcessor.RejectRevisions(result), m => m.HeaderParts.First()).Descendants(W + "jc"));
+    }
+
+    [Fact]
+    public void Split_members_do_not_emit_pPrChange_declined_v1()
+    {
+        // A4 / D1: split (and merge) members are NOT eligible for w:pPrChange — a split's members are
+        // brand-new paragraphs already tracked by the inserted pilcrow mark; a pPr "change" against the
+        // single left paragraph is not well-defined and would fight the reject-fuse. This pins the decline:
+        // whatever the aligner classifies the edit as (split or del/ins), NO pPrChange is emitted, and it
+        // still round-trips.
+        var left = IrTestDocuments.FromBodyXml(
+            "<w:p><w:r><w:t>The quick brown fox jumps over the lazy dog every single day.</w:t></w:r></w:p>");
+        var right = IrTestDocuments.FromBodyXml(
+            "<w:p><w:pPr><w:jc w:val=\"center\"/></w:pPr><w:r><w:t>The quick brown fox jumps</w:t></w:r></w:p>" +
+            "<w:p><w:pPr><w:jc w:val=\"center\"/></w:pPr><w:r><w:t>over the lazy dog every single day.</w:t></w:r></w:p>");
+
+        var result = DocxDiff.Compare(left, right, ModeledOnly);
+        Assert.Empty(BodyOf(result).Descendants(W + "pPrChange"));                          // the decline
+
+        // Content round-trips: accept ≡ right two paragraphs, reject ≡ left one paragraph.
+        static string[] Texts(WmlDocument d) => BodyOf(d).Elements(W + "p")
+            .Select(p => string.Concat(p.Descendants(W + "t").Select(t => (string?)t)))
+            .Where(s => s.Length > 0).ToArray();
+        Assert.Equal(Texts(right), Texts(RevisionProcessor.AcceptRevisions(result)));
+        Assert.Equal(Texts(left), Texts(RevisionProcessor.RejectRevisions(result)));
+    }
+
     // ------------------------------------------------------------------ mid-doc inline sectPr (follow-up A3)
 
     private const string InlineSectBody =
