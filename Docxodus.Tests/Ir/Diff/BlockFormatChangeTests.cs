@@ -43,6 +43,18 @@ public class BlockFormatChangeTests
         "<w:p><w:pPr><w:jc w:val=\"center\"/></w:pPr><w:r><w:t>Same text here.</w:t></w:r></w:p>");
 
     [Fact]
+    public void PublicTrackBlockFormatChanges_false_suppresses_pPrChange()
+    {
+        // The public opt-out (DocxDiffSettings.TrackBlockFormatChanges = false) reaches the engine and
+        // restores the untracked-right-apply behavior end to end.
+        var result = DocxDiff.Compare(PPrLeft, PPrRight,
+            new DocxDiffSettings { TrackBlockFormatChanges = false });
+        Assert.Empty(BodyOf(result).Descendants(W + "pPrChange"));
+        Assert.Empty(DocxDiff.GetRevisions(PPrLeft, PPrRight,
+            new DocxDiffSettings { TrackBlockFormatChanges = false }));
+    }
+
+    [Fact]
     public void PPrOnly_change_is_tracked_with_native_pPrChange()
     {
         // Phase 1 (flipped Phase 0 pin): a modeled pPr-only change is tracked under BOTH policies.
