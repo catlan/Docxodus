@@ -223,6 +223,25 @@ public class BlockFormatChangeTests
         Assert.Single(BodyOf(result).Descendants(W + "shd"));
     }
 
+    // ------------------------------------------------------------------ mid-doc inline sectPr (follow-up A3)
+
+    private const string InlineSectBody =
+        "<w:p><w:pPr><w:sectPr>{S}</w:sectPr></w:pPr><w:r><w:t>Section body.</w:t></w:r></w:p>" +
+        "<w:p><w:r><w:t>Next.</w:t></w:r></w:p>";
+
+    [Fact]
+    public void Inline_sectPr_props_participate_in_paragraph_fingerprint()
+    {
+        var opts = new IrReaderOptions { RetainSources = false };
+        var lp = (IrParagraph)IrReader.Read(IrTestDocuments.FromBodyXml(
+            InlineSectBody.Replace("{S}", "<w:pgSz w:w=\"12240\" w:h=\"15840\"/>")), opts).Body.Blocks[0];
+        var rp = (IrParagraph)IrReader.Read(IrTestDocuments.FromBodyXml(
+            InlineSectBody.Replace("{S}", "<w:pgSz w:w=\"15840\" w:h=\"12240\" w:orient=\"landscape\"/>")), opts).Body.Blocks[0];
+        Assert.Equal(lp.ContentHash, rp.ContentHash);                  // text identical
+        Assert.NotEqual(lp.FormatFingerprint, rp.FormatFingerprint);   // inline sectPr delta is now visible
+        Assert.NotNull(lp.InlineSectionFormat);
+    }
+
     // ------------------------------------------------------------------ tblPrEx (follow-up A2)
 
     [Fact]

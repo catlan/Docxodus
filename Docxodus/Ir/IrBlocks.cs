@@ -82,6 +82,15 @@ internal sealed record IrParagraph : IrBlock
     public IrAnchor? InlineSectionBreakAnchor { get; init; }
 
     /// <summary>
+    /// The modeled section-format of this paragraph's inline `w:pPr/w:sectPr` (an in-document section
+    /// transition), or null when absent. Distinct from <see cref="InlineSectionBreakAnchor"/> (the anchor):
+    /// this carries the page-setup PROPERTIES so a mid-document sectPr-only change is diffable. Folded into
+    /// <see cref="IrBlock.FormatFingerprint"/> (not <see cref="IrBlock.ContentHash"/> — page metadata, not
+    /// content), so such a change classifies FormatOnly and routes to a paired-paragraph emit path.
+    /// </summary>
+    public IrSectionFormat? InlineSectionFormat { get; init; }
+
+    /// <summary>
     /// The oracle's <c>WmlToMarkdownConverter.IsListItem</c> verdict for this paragraph: a purely
     /// <em>structural</em> predicate — true iff a <c>w:numPr</c> is present inline (<c>w:pPr/w:numPr</c>)
     /// OR anywhere up the <c>pStyle → basedOn</c> chain, <b>regardless of whether that numPr carries a
