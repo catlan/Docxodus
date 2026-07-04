@@ -398,20 +398,38 @@ public class BlockFormatChangeTests
     }
 
     [Fact]
-    public void TblPrEx_only_change_is_untracked_and_unreported_consistently()
+    public void TblPrEx_change_is_tracked_with_native_tblPrExChange()
     {
-        // Review finding 3a: a w:tblPrEx-only row change is a documented v1 untracked case — it must be
-        // untracked in BOTH the markup (no w:trPrChange) AND the revisions (no TableRow revision), never
-        // reported by one surface and ignored by the other.
+        // Follow-up A2 (flips the former "untracked v1 ceiling" pin): a w:tblPrEx-only row change is now
+        // tracked with native w:tblPrExChange — NOT via w:trPrChange (that stays trPr-only), and a distinct
+        // TableRow revision with the "tblPrEx" changed-name.
         var left = IrTestDocuments.FromBodyXml(Table(
             "<w:tblPrEx><w:tblBorders><w:top w:val=\"single\" w:sz=\"4\"/></w:tblBorders></w:tblPrEx>", "<w:tcW w:w=\"4000\" w:type=\"dxa\"/>"));
         var right = IrTestDocuments.FromBodyXml(Table(
             "<w:tblPrEx><w:tblBorders><w:top w:val=\"double\" w:sz=\"8\"/></w:tblBorders></w:tblPrEx>", "<w:tcW w:w=\"4000\" w:type=\"dxa\"/>"));
 
-        var body = BodyOf(DocxDiff.Compare(left, right, ModeledOnly));
-        Assert.Empty(body.Descendants(W + "trPrChange"));                                  // untracked in markup
-        Assert.DoesNotContain(DocxDiff.GetRevisions(left, right, ModeledOnly),
-            r => r.FormatChange is { } fc && fc.Scope == DocxDiffFormatChangeScope.TableRow); // and in revisions
+        var result = DocxDiff.Compare(left, right, ModeledOnly);
+        var body = BodyOf(result);
+        var change = body.Descendants(W + "tblPrExChange").Single();
+        Assert.Same(change, change.Parent!.Elements().Last());                              // last child of tblPrEx
+        Assert.Empty(body.Descendants(W + "trPrChange"));                                   // NOT a trPr change
+        Assert.Equal("single",
+            (string?)change.Element(W + "tblPrEx")!.Element(W + "tblBorders")!.Element(W + "top")?.Attribute(W + "val")); // old (left)
+        Assert.Equal("double",
+            (string?)change.Parent!.Element(W + "tblBorders")!.Element(W + "top")?.Attribute(W + "val"));                 // right applied
+
+        var accepted = RevisionProcessor.AcceptRevisions(result);
+        Assert.Equal("double", (string?)BodyOf(accepted).Descendants(W + "tblPrEx").Single()
+            .Element(W + "tblBorders")!.Element(W + "top")?.Attribute(W + "val"));
+        Assert.Empty(BodyOf(accepted).Descendants(W + "tblPrExChange"));
+        var rejected = RevisionProcessor.RejectRevisions(result);
+        Assert.Equal("single", (string?)BodyOf(rejected).Descendants(W + "tblPrEx").Single()
+            .Element(W + "tblBorders")!.Element(W + "top")?.Attribute(W + "val"));          // reject ≡ left
+
+        var rev = Assert.Single(DocxDiff.GetRevisions(left, right, ModeledOnly));
+        Assert.Equal(DocxDiffRevisionType.FormatChanged, rev.Type);
+        Assert.Equal(DocxDiffFormatChangeScope.TableRow, rev.FormatChange!.Scope);
+        Assert.Equal(new[] { "tblPrEx" }, rev.FormatChange.ChangedPropertyNames);
     }
 
     [Fact]

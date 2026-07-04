@@ -1524,9 +1524,14 @@ internal static class IrRevisionRenderer
     {
         // Compare the flattened trackable projections (w:trPr children only, empty ≡ absent) — the exact
         // subset the markup's w:trPrChange/w:tcPrChange attribution uses — so GetRevisions and Compare agree
-        // (a w:tblPrEx-only or empty-vs-absent-shell change is untracked in BOTH, never reported by one alone).
+        // (an empty-vs-absent-shell change is untracked in BOTH, never reported by one alone).
         if (!left.TrPrShellDigest.Equals(right.TrPrShellDigest))
             sink.Add(TableShellRevision(IrFormatChangeScope.TableRow, "shell",
+                left.Anchor.ToString(), right.Anchor.ToString(), ctx));
+        // w:tblPrEx (row-level table property exceptions) — its own TableRow revision with a distinct
+        // changed-name so it never double-fires with the trPr "shell" revision.
+        if (!left.TrPrExDigest.Equals(right.TrPrExDigest))
+            sink.Add(TableShellRevision(IrFormatChangeScope.TableRow, "tblPrEx",
                 left.Anchor.ToString(), right.Anchor.ToString(), ctx));
 
         int cn = System.Math.Min(left.Cells.Count, right.Cells.Count);

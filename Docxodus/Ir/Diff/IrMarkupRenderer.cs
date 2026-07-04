@@ -3453,6 +3453,7 @@ internal static class IrMarkupRenderer
     private static readonly XName[] TblGridInnerExclude = { W.tblGridChange };
     private static readonly XName[] TrPrInnerExclude = { W.ins, W.del, W.trPrChange };
     private static readonly XName[] TcPrInnerExclude = { W.cellIns, W.cellDel, W.cellMerge, W.tcPrChange };
+    private static readonly XName[] TblPrExInnerExclude = { W.tblPrExChange };
 
     /// <summary>
     /// Stamp the two TABLE-LEVEL native shell markers where the emitted right shell differs from the left:
@@ -3479,6 +3480,7 @@ internal static class IrMarkupRenderer
             return;
 
         ApplyShellChange(newRow, W.trPr, W.trPrChange, leftRow.Element(W.trPr), state, idOnly: false, TrPrInnerExclude);
+        ApplyShellChange(newRow, W.tblPrEx, W.tblPrExChange, leftRow.Element(W.tblPrEx), state, idOnly: false, TblPrExInnerExclude);
 
         var leftCells = leftRow.Elements(W.tc).ToList();
         var newCells = newRow.Elements(W.tc).ToList();

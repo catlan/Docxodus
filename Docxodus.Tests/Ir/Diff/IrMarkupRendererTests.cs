@@ -207,6 +207,7 @@ public class IrMarkupRendererTests
                     // what the markup tracks: a w:tblPrEx-only change is untracked (right-applied) in BOTH the
                     // markup and this assertion, mirroring how the pPr signature is modeled-grade.
                     sink.Add("trf:" + row.TrPrShellDigest.ToHex());
+                    sink.Add("tprex:" + row.TrPrExDigest.ToHex());
                     foreach (var cell in row.Cells)
                         foreach (var b in cell.Blocks)
                             CollectFormatSignatures(b, settings, sink);
