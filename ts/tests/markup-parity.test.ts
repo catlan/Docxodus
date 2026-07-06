@@ -71,26 +71,10 @@ function markupSkipReason(leftName: string, rightName: string): string | null {
 // pair must be removed from this list (never grows, only shrinks).
 const KNOWN_DIVERGENT = new Set<string>([
   'WC-BodyBookmarks-Before.docx -> WC-BodyBookmarks-After.docx',
-  'WC006-Table.docx -> WC006-Table-Delete-Contests-of-Row.docx',
-  'WC006-Table.docx -> WC006-Table-Delete-Row.docx',
-  'WC009-Table-Unmodified.docx -> WC009-Table-Cell-1-1-Mod.docx',
   'WC014-SmartArt-Before.docx -> WC014-SmartArt-After.docx',
-  'WC019-Hyperlink-Before.docx -> WC019-Hyperlink-After-2.docx',
-  'WC024-Table-Before.docx -> WC024-Table-After.docx',
-  'WC024-Table-Before.docx -> WC024-Table-After2.docx',
-  'WC025-Simple-Table-Before.docx -> WC025-Simple-Table-After.docx',
-  'WC026-Long-Table-Before.docx -> WC026-Long-Table-After-1.docx',
-  'WC033-Merged-Cells-Before.docx -> WC033-Merged-Cells-After1.docx',
-  'WC039-Break-In-Row.docx -> WC039-Break-In-Row-After1.docx',
-  'WC041-Table-5.docx -> WC041-Table-5-Mod.docx',
-  'WC042-Table-5.docx -> WC042-Table-5-Mod.docx',
-  'WC043-Nested-Table.docx -> WC043-Nested-Table-Mod.docx',
-  'WC048-Text-Box-in-Cell.docx -> WC048-Text-Box-in-Cell-Mod.docx',
-  'WC049-Text-Box-in-Cell.docx -> WC049-Text-Box-in-Cell-Mod.docx',
   'WC052-SmartArt-Same.docx -> WC052-SmartArt-Same-Mod.docx',
   'WC055-French.docx -> WC055-French-Mod.docx',
   'WC056-French.docx -> WC056-French-Mod.docx',
-  'WC058-Table-Merged-Cell.docx -> WC058-Table-Merged-Cell-Mod.docx',
   'self WC/WC-BodyBookmarks-Before.docx',
 ]);
 

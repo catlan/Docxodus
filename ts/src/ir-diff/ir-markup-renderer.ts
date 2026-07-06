@@ -1,4 +1,5 @@
-import { unzipSync, strToU8 } from 'fflate';
+import { unzipSync, strFromU8, strToU8 } from 'fflate';
+import { anchorToString } from '../ir/ir-anchor.js';
 import { W, PT_NS, R } from '../ir/names.js';
 import type { IrBlock, IrParagraph, IrTable } from '../ir/ir-blocks.js';
 import { readIrDocument, type IrDocument } from '../ir/ir-reader.js';
@@ -8,14 +9,19 @@ import type { IrCellOp, IrEditOp, IrEditScript, IrRowOp, IrTableDiff } from './i
 import type { IrDiffToken } from './ir-diff-token.js';
 import type { IrTokenDiff, IrTokenOp } from './ir-token-diff.js';
 import { writeXmlPart } from '../xml/xwriter.js';
-import { XElement, nameEquals, xname, type XAttributeInfo, type XName } from '../xml/xelement.js';
+import { XElement, nameEquals, parseXml, xname, type XAttributeInfo, type XName } from '../xml/xelement.js';
 import { attr, childrenElements, cloneElement, descendantsAndSelf, element, replaceName, type XChild } from '../xml/xclone.js';
 
 type RevKind = 'Ins' | 'Del' | 'MoveFrom' | 'MoveTo';
 
 const XML_NS = 'http://www.w3.org/XML/1998/namespace';
 const XML_SPACE = xname(XML_NS, 'space');
+const REL_NS = 'http://schemas.openxmlformats.org/package/2006/relationships';
+const REL_HYPERLINK = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink';
 const SOURCE_LINK_ID = xname(PT_NS, 'SourceLinkId');
+const REL_ID = xname('', 'Id');
+const REL_TYPE = xname('', 'Type');
+const REL_TARGET = xname('', 'Target');
 
 interface RenderState {
   readonly left: IrDocument;
@@ -33,6 +39,7 @@ export function renderIrMarkup(
   options: IrDiffSettingsOptions | IrDiffSettings = {},
 ): Map<string, Uint8Array> {
   const leftParts = unzipSync(leftDocx);
+  const rightParts = unzipSync(rightDocx);
   const settings = normalizeIrDiffSettings(options);
   const left = readIrDocument(leftDocx, { retainSources: true });
   const right = readIrDocument(rightDocx, { retainSources: true });
@@ -67,13 +74,15 @@ export function renderIrMarkup(
 
   const newBody = cloneElement(body, { children: newBodyChildren });
   const normalized = normalizeBookmarks(stripUnids(replaceChild(root, body, newBody)), bodyBookmarkNames(left), bodyBookmarkNames(right));
-  const newRoot = cloneElement(linqOutputShape(normalized), {
+  const remapped = remapHyperlinkRelationshipCollisions(normalized, leftParts, rightParts);
+  const newRoot = cloneElement(linqOutputShape(remapped.root), {
     documentProlog: '<?xml version="1.0" encoding="utf-8" standalone="yes"?>\n',
   });
 
   const result = new Map<string, Uint8Array>();
   for (const [name, bytes] of Object.entries(leftParts)) result.set(name, bytes);
   result.set('word/document.xml', strToU8(writeXmlPart(newRoot)));
+  if (remapped.relationshipsXml) result.set('word/_rels/document.xml.rels', strToU8(remapped.relationshipsXml));
   return result;
 }
 
@@ -720,6 +729,7 @@ function applyTableLevelShellChanges(newTbl: XElement, leftTbl: XElement, state:
 function applyRowAndCellShellChanges(newRow: XElement, leftRow: XElement, state: RenderState): XElement {
   if (!state.settings.trackBlockFormatChanges) return newRow;
   applyShellChange(newRow, W.trPr, W.trPrChange, leftRow.element(W.trPr), state, false, [W.ins, W.del, W.trPrChange]);
+  applyShellChange(newRow, W.tblPrEx, W.tblPrExChange, leftRow.element(W.tblPrEx), state, false, [W.tblPrExChange]);
   const leftCells = childrenElements(leftRow, W.tc);
   const newCells = childrenElements(newRow, W.tc);
   for (let i = 0; i < leftCells.length && i < newCells.length; i++) applyShellChange(newCells[i]!, W.tcPr, W.tcPrChange, leftCells[i]!.element(W.tcPr), state, false, [W.cellIns, W.cellDel, W.cellMerge, W.tcPrChange]);
@@ -731,11 +741,28 @@ function applyShellChange(host: XElement, shellName: XName, changeName: XName, l
   if (compareXml(cleanShell(leftShell, changeName, exclude)) === compareXml(cleanShell(rightShell, changeName, exclude))) return;
   if (!rightShell) {
     rightShell = element(shellName);
-    host.children.unshift(rightShell);
+    insertShellInSchemaOrder(host, rightShell, shellName);
   }
   rightShell.children.splice(0, rightShell.children.length, ...rightShell.children.filter((c) => !(c instanceof XElement && nameEquals(c.name, changeName))));
   const inner = leftShell ? cloneElement(leftShell, { children: childrenElements(leftShell).filter((e) => !nameEquals(e.name, changeName) && !exclude.some((x) => nameEquals(x, e.name))).map((e) => stripUnids(cloneElement(e))) }) : element(shellName);
   rightShell.children.push(element(changeName, idOnly ? [attr(W.id, nextId(state))] : revisionAttrs(state), [inner]));
+}
+
+function insertShellInSchemaOrder(host: XElement, shell: XElement, shellName: XName): void {
+  if (nameEquals(shellName, W.tblGrid)) {
+    const tblPrIndex = host.children.findIndex((c) => c instanceof XElement && nameEquals(c.name, W.tblPr));
+    if (tblPrIndex >= 0) {
+      host.children.splice(tblPrIndex + 1, 0, shell);
+      return;
+    }
+  } else if (nameEquals(shellName, W.trPr)) {
+    const tblPrExIndex = host.children.findIndex((c) => c instanceof XElement && nameEquals(c.name, W.tblPrEx));
+    if (tblPrExIndex >= 0) {
+      host.children.splice(tblPrExIndex + 1, 0, shell);
+      return;
+    }
+  }
+  host.children.unshift(shell);
 }
 
 function applySectPrChange(output: XElement, oldSect: XElement, rightSect: XElement, state: RenderState): void {
@@ -775,6 +802,81 @@ function linqOutputShape(el: XElement): XElement {
     children: node.children,
     emptyElementSpace: node.children.length === 0,
   }));
+}
+
+function remapHyperlinkRelationshipCollisions(
+  root: XElement,
+  leftParts: Record<string, Uint8Array>,
+  rightParts: Record<string, Uint8Array>,
+): { readonly root: XElement; readonly relationshipsXml: string | null } {
+  const leftRels = relationshipRoot(leftParts);
+  const rightRels = relationshipRoot(rightParts);
+  if (!leftRels || !rightRels) return { root, relationshipsXml: null };
+
+  const leftById = hyperlinkRelationships(leftRels);
+  const rightById = hyperlinkRelationships(rightRels);
+  const used = new Set([...relationshipsById(leftRels).keys()]);
+  const remap = new Map<string, string>();
+  const newRelationships: XElement[] = [];
+  for (const [id, rightRel] of rightById) {
+    const leftRel = leftById.get(id);
+    if (!leftRel) continue;
+    if (leftRel.attribute(REL_TARGET) === rightRel.attribute(REL_TARGET)) continue;
+    const fresh = freshRelationshipId(used);
+    used.add(fresh);
+    remap.set(id, fresh);
+    newRelationships.push(cloneElement(rightRel, {
+      attributes: [...rightRel.attributeInfos()].map((a) => nameEquals(a.name, REL_ID) ? { ...a, value: fresh } : a),
+    }));
+  }
+  if (remap.size === 0) return { root, relationshipsXml: null };
+
+  const rewrittenRoot = rewriteInsertedHyperlinkIds(root, remap);
+  const rewrittenRels = cloneElement(leftRels, { children: [...leftRels.children, ...newRelationships] });
+  return { root: rewrittenRoot, relationshipsXml: writeXmlPart(rewrittenRels) };
+}
+
+function relationshipRoot(parts: Record<string, Uint8Array>): XElement | null {
+  const bytes = parts['word/_rels/document.xml.rels'];
+  return bytes ? parseXml(strFromU8(bytes)) : null;
+}
+
+function relationshipsById(root: XElement): Map<string, XElement> {
+  const map = new Map<string, XElement>();
+  for (const rel of childrenElements(root, xname(REL_NS, 'Relationship'))) {
+    const id = rel.attribute(REL_ID);
+    if (id) map.set(id, rel);
+  }
+  return map;
+}
+
+function hyperlinkRelationships(root: XElement): Map<string, XElement> {
+  const map = new Map<string, XElement>();
+  for (const [id, rel] of relationshipsById(root)) {
+    if (rel.attribute(REL_TYPE) === REL_HYPERLINK) map.set(id, rel);
+  }
+  return map;
+}
+
+function freshRelationshipId(used: ReadonlySet<string>): string {
+  let n = 1;
+  while (used.has(`rIdRemap${n}`)) n++;
+  return `rIdRemap${n}`;
+}
+
+function rewriteInsertedHyperlinkIds(root: XElement, remap: ReadonlyMap<string, string>): XElement {
+  return transformDescendants(root, (node) => {
+    if (!nameEquals(node.name, W.hyperlink) || !isInsertedOnlyHyperlink(node)) return null;
+    const rewritten = [...node.attributeInfos()].map((a) => {
+      const replacement = nameEquals(a.name, R.id) ? remap.get(a.value) : undefined;
+      return replacement ? { ...a, value: replacement } : a;
+    });
+    return cloneElement(node, { attributes: rewritten, children: node.children });
+  });
+}
+
+function isInsertedOnlyHyperlink(link: XElement): boolean {
+  return [...link.descendants(W.ins)].length > 0 && [...link.descendants(W.del)].length === 0;
 }
 
 function normalizeBookmarks(root: XElement, leftNames: ReadonlySet<string>, rightNames: ReadonlySet<string>): XElement {
@@ -1019,7 +1121,7 @@ function isSectPrProp(e: XElement): boolean { return !nameEquals(e.name, W.heade
 function sectPrPropsString(e: XElement): string { return writeXmlPart(element(xname('', 'sect'), [], childrenElements(e).filter(isSectPrProp).map((c) => stripUnids(cloneElement(c)))), { includeDeclaration: false }); }
 function indexRows(table: IrTable | undefined): Map<string, XElement> {
   const map = new Map<string, XElement>();
-  for (const row of table?.rows ?? []) if (row.source.element) map.set(String(row.anchor), row.source.element);
+  for (const row of table?.rows ?? []) if (row.source.element) map.set(anchorToString(row.anchor), row.source.element);
   return map;
 }
 function coalesceAdjacentHyperlinks(content: XElement[]): XElement[] {
