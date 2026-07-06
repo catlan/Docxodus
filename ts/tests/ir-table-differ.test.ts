@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'vitest';
-import { IrTableDiffer, type IrDocument, type IrTable } from '../src/index.js';
+import { buildIrEditScript, IrTableDiffer, writeIrEditScriptJson, type IrDocument, type IrTable } from '../src/index.js';
+import { verifyIrEditScript } from './helpers/ir-edit-script-verifier.js';
 import { fromBodyXml } from './helpers/ir-test-documents.js';
 
 const cell = (text: string) => `<w:tc><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:tc>`;
@@ -15,8 +16,10 @@ function onlyTable(doc: IrDocument): IrTable {
 
 describe('IrTableDiffer', () => {
   test('cell text edit surfaces as token diff in that cell', () => {
-    const left = onlyTable(fromXml(tableXml(row(cell('alpha one'), cell('beta two')), row(cell('gamma three'), cell('delta four')))));
-    const right = onlyTable(fromXml(tableXml(row(cell('alpha one'), cell('beta two')), row(cell('gamma three'), cell('delta EDITED')))));
+    const leftDoc = fromXml(tableXml(row(cell('alpha one'), cell('beta two')), row(cell('gamma three'), cell('delta four'))));
+    const rightDoc = fromXml(tableXml(row(cell('alpha one'), cell('beta two')), row(cell('gamma three'), cell('delta EDITED'))));
+    const left = onlyTable(leftDoc);
+    const right = onlyTable(rightDoc);
     const table = IrTableDiffer.diff(left, right);
 
     expect(table.rowOps[0]!.kind).toBe('EqualRow');
@@ -30,6 +33,13 @@ describe('IrTableDiffer', () => {
     const tokenDiff = blockOp.tokenDiff as { ops: ReadonlyArray<{ kind: string }> };
     expect(tokenDiff.ops.some((o) => o.kind === 'Insert' || o.kind === 'Delete')).toBe(true);
     expect(tokenDiff.ops.some((o) => o.kind === 'Equal')).toBe(true);
+
+    const script = buildIrEditScript(leftDoc, rightDoc);
+    verifyIrEditScript(leftDoc, rightDoc, script);
+    const json = writeIrEditScriptJson(script);
+    expect(json).toContain('"tableDiff": {');
+    expect(json).toContain('"cellOps": [');
+    expect(json).toContain('"blockOps": [');
   });
 
   test('row inserted and deleted becomes one modified row between anchors', () => {

@@ -19,6 +19,8 @@ export * from './ir-diff/ir-diff-tokenizer.js';
 export * from './ir-diff/ir-token-diff.js';
 export * from './ir-diff/ir-token-differ.js';
 export * from './ir-diff/ir-edit-script.js';
+export * from './ir-diff/ir-edit-script-builder.js';
+export * from './ir-diff/ir-edit-script-json.js';
 export * from './ir-diff/ir-table-differ.js';
 export * from './ir-diff/ir-split-segmenter.js';
 export * from './ir-diff/ir-block-alignment.js';

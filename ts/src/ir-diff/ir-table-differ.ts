@@ -11,6 +11,7 @@ import {
 } from './ir-diff-settings.js';
 import { tokenizeIrParagraph } from './ir-diff-tokenizer.js';
 import type { IrCellOp, IrEditOp, IrRowOp, IrRowOpKind, IrTableDiff } from './ir-edit-script.js';
+import { projectIrAlignment } from './ir-edit-script-builder.js';
 import { diffIrTokens } from './ir-token-differ.js';
 
 interface RowCand {
@@ -240,7 +241,7 @@ function diffCells(left: IrRow, right: IrRow, settings: IrDiffSettings): IrCellO
 }
 
 function diffCellBlocks(left: IrCell, right: IrCell, settings: IrDiffSettings): IrEditOp[] {
-  return projectAlignment(alignIrBlocks(left.blocks, right.blocks, settings).entries, settings);
+  return projectIrAlignment(left.blocks, alignIrBlocks(left.blocks, right.blocks, settings), settings);
 }
 
 function projectAlignment(entries: ReadonlyArray<IrAlignedBlock>, settings: IrDiffSettings): IrEditOp[] {

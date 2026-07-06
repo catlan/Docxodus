@@ -1,8 +1,10 @@
 import { describe, expect, test } from 'vitest';
 import {
   IrBlockAligner,
+  buildIrEditScript,
   IrDiffTokenizer,
   IrSplitSegmenter,
+  writeIrEditScriptJson,
   type IrDiffSettings,
   type IrDocument,
   type IrParagraph,
@@ -10,6 +12,7 @@ import {
   type IrTokenOp,
 } from '../src/index.js';
 import { assertInvariants, count } from './helpers/ir-alignment-asserts.js';
+import { verifyIrEditScript } from './helpers/ir-edit-script-verifier.js';
 import { fromBodyXml, p } from './helpers/ir-test-documents.js';
 
 const S: Partial<IrDiffSettings> = { detectSplitMerge: true };
@@ -122,6 +125,15 @@ describe('IrSplitMerge', () => {
     expect(split.multiBlocks).toHaveLength(2);
     expect(count(a, 'Inserted')).toBe(0);
     expect(count(a, 'Deleted')).toBe(0);
+
+    const script = buildIrEditScript(l, r, S);
+    verifyIrEditScript(l, r, script, S);
+    const op = script.ops.find((o) => o.kind === 'SplitBlock')!;
+    expect(op.leftAnchor).not.toBeNull();
+    expect(op.rightAnchor).toBeNull();
+    expect(op.splitMergeAnchors).toHaveLength(2);
+    expect(op.segmentDiffs).toHaveLength(2);
+    expect(writeIrEditScriptJson(script)).toContain('"kind": "SplitBlock"');
   });
 
   test('detection fires for a fully free three way split', () => {
@@ -177,6 +189,14 @@ describe('IrSplitMerge', () => {
     const { doc: l } = readParas('aaa bbb ccc ddd. ', 'eee fff ggg hhh.', 'anchor one two three four.');
     const { doc: r } = readParas('aaa bbb ccc ddd. eee fff ggg hhh.', 'anchor one two three four.');
     expect(align(l, r).entries.find((e) => e.kind === 'Merge')!.multiBlocks).toHaveLength(2);
+    const script = buildIrEditScript(l, r, S);
+    verifyIrEditScript(l, r, script, S);
+    const op = script.ops.find((e) => e.kind === 'MergeBlock')!;
+    expect(op.leftAnchor).toBeNull();
+    expect(op.rightAnchor).not.toBeNull();
+    expect(op.splitMergeAnchors).toHaveLength(2);
+    expect(op.segmentDiffs).toHaveLength(2);
+    expect(writeIrEditScriptJson(script)).toContain('"kind": "MergeBlock"');
   });
 
   test('detection two adjacent splits never share a right block', () => {
