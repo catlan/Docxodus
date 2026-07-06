@@ -6,11 +6,18 @@ import { blockSignature } from './ir-modeled-format.js';
 import type { IrAlignedBlock, IrAlignmentKind, IrBlockAlignment } from './ir-block-alignment.js';
 import { IrBlockSimilarity } from './ir-block-similarity.js';
 import { normalizeIrDiffSettings, type IrDiffSettings, type IrDiffSettingsOptions } from './ir-diff-settings.js';
+import { tokenizeIrParagraph } from './ir-diff-tokenizer.js';
+import { IrSplitSegmenter } from './ir-split-segmenter.js';
 
 interface Candidate {
   readonly leftIndex: number;
   readonly rightIndex: number;
   readonly anchorKind: IrAlignmentKind;
+}
+
+interface SplitMergeGroup {
+  readonly singularIndex: number;
+  readonly pluralIndexes: number[];
 }
 
 export function alignIrBlocks(
@@ -46,10 +53,12 @@ export function alignIrBlocks(
     .map((c) => ({ left: candidates[c]!.leftIndex, right: candidates[c]!.rightIndex }))
     .sort((a, b) => a.left - b.left);
 
-  fillGaps(leftBlocks, rightBlocks, spinePairs, leftKind, rightKind, leftMatch, rightMatch, similarity, settings);
+  const splitGroups: SplitMergeGroup[] = [];
+  const mergeGroups: SplitMergeGroup[] = [];
+  fillGaps(leftBlocks, rightBlocks, spinePairs, leftKind, rightKind, leftMatch, rightMatch, similarity, settings, splitGroups, mergeGroups);
   detectCrossGapMoves(leftBlocks, rightBlocks, leftKind, rightKind, leftMatch, rightMatch, similarity, settings);
 
-  return { entries: emitEntries(leftBlocks, rightBlocks, leftKind, rightKind, rightMatch, leftMatch) };
+  return { entries: emitEntries(leftBlocks, rightBlocks, leftKind, rightKind, rightMatch, leftMatch, splitGroups, mergeGroups) };
 }
 
 export function alignIrDocuments(
@@ -217,15 +226,17 @@ function fillGaps(
   rightMatch: number[],
   similarity: IrBlockSimilarity,
   settings: IrDiffSettings,
+  splitGroups: SplitMergeGroup[],
+  mergeGroups: SplitMergeGroup[],
 ): void {
   let prevLeft = -1;
   let prevRight = -1;
   for (const { left, right } of spinePairs) {
-    fillOneGap(leftBlocks, rightBlocks, prevLeft + 1, left, prevRight + 1, right, leftKind, rightKind, leftMatch, rightMatch, similarity, settings);
+    fillOneGap(leftBlocks, rightBlocks, prevLeft + 1, left, prevRight + 1, right, leftKind, rightKind, leftMatch, rightMatch, similarity, settings, splitGroups, mergeGroups);
     prevLeft = left;
     prevRight = right;
   }
-  fillOneGap(leftBlocks, rightBlocks, prevLeft + 1, leftBlocks.length, prevRight + 1, rightBlocks.length, leftKind, rightKind, leftMatch, rightMatch, similarity, settings);
+  fillOneGap(leftBlocks, rightBlocks, prevLeft + 1, leftBlocks.length, prevRight + 1, rightBlocks.length, leftKind, rightKind, leftMatch, rightMatch, similarity, settings, splitGroups, mergeGroups);
 }
 
 function fillOneGap(
@@ -241,6 +252,8 @@ function fillOneGap(
   rightMatch: number[],
   similarity: IrBlockSimilarity,
   settings: IrDiffSettings,
+  splitGroups: SplitMergeGroup[],
+  mergeGroups: SplitMergeGroup[],
 ): void {
   const freeLeft: number[] = [];
   for (let i = leftFrom; i < leftTo; i++) if (leftMatch[i] === -1) freeLeft.push(i);
@@ -261,6 +274,43 @@ function fillOneGap(
     pairAs('Modified', tableLeft[0]!, tableRight[0]!, leftKind, rightKind, leftMatch, rightMatch);
     removeValue(leftoverLeft, tableLeft[0]!);
     removeValue(leftoverRight, tableRight[0]!);
+  }
+
+  if (settings.detectSplitMerge) {
+    detectOneToManyInGap(
+      leftBlocks,
+      rightBlocks,
+      leftFrom,
+      leftTo,
+      rightFrom,
+      rightTo,
+      leftKind,
+      rightKind,
+      leftMatch,
+      rightMatch,
+      leftoverLeft,
+      leftoverRight,
+      'Split',
+      splitGroups,
+      settings,
+    );
+    detectOneToManyInGap(
+      rightBlocks,
+      leftBlocks,
+      rightFrom,
+      rightTo,
+      leftFrom,
+      leftTo,
+      rightKind,
+      leftKind,
+      rightMatch,
+      leftMatch,
+      leftoverRight,
+      leftoverLeft,
+      'Merge',
+      mergeGroups,
+      settings,
+    );
   }
 
   if (leftoverLeft.length === 1 && leftoverRight.length === 1) {
@@ -343,6 +393,146 @@ function similarityPair(
   }
 }
 
+function detectOneToManyInGap(
+  singularBlocks: ReadonlyArray<IrBlock>,
+  pluralBlocks: ReadonlyArray<IrBlock>,
+  singularFrom: number,
+  singularTo: number,
+  pluralFrom: number,
+  pluralTo: number,
+  singularKind: Array<IrAlignmentKind | null>,
+  pluralKind: Array<IrAlignmentKind | null>,
+  singularMatch: number[],
+  pluralMatch: number[],
+  leftoverSingular: number[],
+  leftoverPlural: number[],
+  kind: 'Split' | 'Merge',
+  groups: SplitMergeGroup[],
+  settings: IrDiffSettings,
+): void {
+  const pluralContent = Array<number>(pluralTo - pluralFrom).fill(-1);
+  const contentAt = (pj: number): number => {
+    const idx = pj - pluralFrom;
+    if (pluralContent[idx]! < 0) {
+      const block = pluralBlocks[pj]!;
+      pluralContent[idx] = block.kind === 'paragraph' ? contentTokenCount(block, settings) : 0;
+    }
+    return pluralContent[idx]!;
+  };
+
+  for (let si = singularFrom; si < singularTo; si++) {
+    const singular = singularBlocks[si]!;
+    if (singular.kind !== 'paragraph') continue;
+
+    let partner = -1;
+    if (singularMatch[si] !== -1) {
+      if (singularKind[si] !== 'Modified') continue;
+      partner = singularMatch[si]!;
+      if (partner < pluralFrom || partner >= pluralTo) continue;
+    }
+
+    const run = findQualifyingRun(singular, partner, pluralBlocks, pluralFrom, pluralTo, pluralMatch, settings, contentAt);
+    if (run === null) continue;
+
+    singularKind[si] = kind;
+    singularMatch[si] = run[0]!;
+    for (const pj of run) {
+      pluralKind[pj] = kind;
+      pluralMatch[pj] = si;
+    }
+    groups.push({ singularIndex: si, pluralIndexes: run });
+
+    removeValue(leftoverSingular, si);
+    for (const pj of run) removeValue(leftoverPlural, pj);
+  }
+}
+
+function findQualifyingRun(
+  singular: Extract<IrBlock, { kind: 'paragraph' }>,
+  partner: number,
+  pluralBlocks: ReadonlyArray<IrBlock>,
+  pluralFrom: number,
+  pluralTo: number,
+  pluralMatch: ReadonlyArray<number>,
+  settings: IrDiffSettings,
+  pluralContent: (index: number) => number,
+): number[] | null {
+  const eligible = (pj: number): boolean =>
+    pluralBlocks[pj]!.kind === 'paragraph' && (pluralMatch[pj] === -1 || pj === partner);
+
+  const singularContent = contentTokenCount(singular, settings);
+  const maxWindowContent = singularContent / (1 - settings.splitForeignSlack);
+  const minWindowContent = settings.splitCoverageThreshold * singularContent;
+
+  for (let a = pluralFrom; a < pluralTo; a++) {
+    if (!eligible(a)) continue;
+    let windowContent = pluralContent(a);
+    for (let b = a + 1; b < pluralTo && b - a + 1 <= settings.splitMaxRunLength; b++) {
+      if (!eligible(b)) break;
+      windowContent += pluralContent(b);
+      if (windowContent > maxWindowContent) break;
+      if (windowContent < minWindowContent) continue;
+      const trimmed = trimAndGate(singular, partner, a, b, pluralBlocks, pluralMatch, settings);
+      if (trimmed !== null) return trimmed;
+    }
+  }
+  return null;
+}
+
+function trimAndGate(
+  singular: Extract<IrBlock, { kind: 'paragraph' }>,
+  partner: number,
+  a: number,
+  b: number,
+  pluralBlocks: ReadonlyArray<IrBlock>,
+  pluralMatch: ReadonlyArray<number>,
+  settings: IrDiffSettings,
+): number[] | null {
+  let window: number[] = [];
+  for (let pj = a; pj <= b; pj++) window.push(pj);
+  let paras = window.map((pj) => pluralBlocks[pj] as Extract<IrBlock, { kind: 'paragraph' }>);
+  let score = IrSplitSegmenter.score(singular, paras, settings);
+
+  let lo = 0;
+  let hi = window.length - 1;
+  while (lo <= hi && score.memberMatchedContent[lo] === 0) lo++;
+  while (hi >= lo && score.memberMatchedContent[hi] === 0) hi--;
+  if (hi - lo + 1 < 2) return null;
+  if (lo !== 0 || hi !== window.length - 1) {
+    window = window.slice(lo, hi + 1);
+    paras = paras.slice(lo, hi + 1);
+    score = IrSplitSegmenter.score(singular, paras, settings);
+  }
+
+  let contentMembers = 0;
+  for (const p of paras) if (hasContentTokens(p, settings)) contentMembers++;
+  if (contentMembers < 2) return null;
+
+  if (partner !== -1) {
+    if (partner < window[0]! || partner > window[window.length - 1]!) return null;
+    let anyFree = false;
+    for (const pj of window) if (pj !== partner && pluralMatch[pj] === -1) anyFree = true;
+    if (!anyFree) return null;
+  }
+
+  if (score.coverage < settings.splitCoverageThreshold) return null;
+  if (score.foreignSlack > settings.splitForeignSlack) return null;
+  return window;
+}
+
+function contentTokenCount(paragraph: Extract<IrBlock, { kind: 'paragraph' }>, settings: IrDiffSettings): number {
+  let n = 0;
+  for (const t of tokenizeIrParagraph(paragraph, settings)) if (t.kind !== 'Separator' && t.kind !== 'Textbox') n++;
+  return n;
+}
+
+function hasContentTokens(paragraph: Extract<IrBlock, { kind: 'paragraph' }>, settings: IrDiffSettings): boolean {
+  for (const t of tokenizeIrParagraph(paragraph, settings)) {
+    if (t.kind !== 'Separator' && t.kind !== 'Textbox') return true;
+  }
+  return false;
+}
+
 function detectCrossGapMoves(
   leftBlocks: ReadonlyArray<IrBlock>,
   rightBlocks: ReadonlyArray<IrBlock>,
@@ -403,7 +593,14 @@ function emitEntries(
   rightKind: ReadonlyArray<IrAlignmentKind | null>,
   rightMatch: ReadonlyArray<number>,
   leftMatch: ReadonlyArray<number>,
+  splitGroups: ReadonlyArray<SplitMergeGroup>,
+  mergeGroups: ReadonlyArray<SplitMergeGroup>,
 ): IrAlignedBlock[] {
+  const splitByFirstMember = new Map<number, SplitMergeGroup>();
+  for (const g of splitGroups) splitByFirstMember.set(g.pluralIndexes[0]!, g);
+  const mergeByRight = new Map<number, SplitMergeGroup>();
+  for (const g of mergeGroups) mergeByRight.set(g.singularIndex, g);
+
   const deletionsAfterLeft = new Map<number, number[]>();
   let lastPairedLeft = -1;
   for (let i = 0; i < leftBlocks.length; i++) {
@@ -419,6 +616,33 @@ function emitEntries(
   const entries: IrAlignedBlock[] = [];
   emitDeletions(deletionsAfterLeft, -1, leftBlocks, entries);
   for (let j = 0; j < rightBlocks.length; j++) {
+    if (rightKind[j] === 'Split') {
+      const sg = splitByFirstMember.get(j);
+      if (sg) {
+        entries.push({
+          kind: 'Split',
+          left: leftBlocks[sg.singularIndex]!,
+          right: null,
+          multiBlocks: sg.pluralIndexes.map((rj) => rightBlocks[rj]!),
+        });
+        emitDeletions(deletionsAfterLeft, sg.singularIndex, leftBlocks, entries);
+      }
+      continue;
+    }
+
+    if (rightKind[j] === 'Merge') {
+      const mg = mergeByRight.get(j);
+      if (!mg) throw new Error(`IrBlockAligner: right block ${j} is Merge-stamped but no merge group was recorded for it.`);
+      entries.push({
+        kind: 'Merge',
+        left: null,
+        right: rightBlocks[j]!,
+        multiBlocks: mg.pluralIndexes.map((li) => leftBlocks[li]!),
+      });
+      for (const mi of mg.pluralIndexes) emitDeletions(deletionsAfterLeft, mi, leftBlocks, entries);
+      continue;
+    }
+
     const kind = rightKind[j] ?? 'Inserted';
     const li = rightMatch[j]!;
     entries.push({
