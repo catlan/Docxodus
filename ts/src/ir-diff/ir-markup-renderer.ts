@@ -92,7 +92,7 @@ export function renderIrMarkup(
   const result = new Map<string, Uint8Array>();
   for (const [name, bytes] of Object.entries(leftParts)) result.set(name, bytes);
 
-  const imported = importRightRelatedParts(stripUnids(replaceChild(root, body, newBody)), result, leftParts, rightParts, 'word/document.xml');
+  const imported = importRightRelatedParts(stripUnids(replaceChild(root, body, newBody)), result, rightParts, 'word/document.xml', 'word/document.xml');
   renderNoteScopes(script, state, result, leftParts, rightParts);
   const footnoteRemap = renumberNoteIds(imported, result, 'word/footnotes.xml', W.footnoteReference, W.footnote, W_FOOTNOTES);
   const endnoteRemap = renumberNoteIds(imported, result, 'word/endnotes.xml', W.endnoteReference, W.endnote, W_ENDNOTES);
@@ -881,17 +881,16 @@ function remapHyperlinkRelationshipCollisions(
 function importRightRelatedParts(
   root: XElement,
   outParts: Map<string, Uint8Array>,
-  leftParts: Record<string, Uint8Array>,
   rightParts: Record<string, Uint8Array>,
+  sourcePartName: string,
   destPartName: string,
 ): XElement {
   let rewritten = root;
   const leftRelsRoot = ensureRelationshipsRoot(outParts, relsPartName(destPartName));
-  const rightRelsRoot = relationshipRootForPart(rightParts, destPartName);
+  const rightRelsRoot = relationshipRootForPart(rightParts, sourcePartName);
   if (!rightRelsRoot) return root;
   const rightRels = relationshipsById(rightRelsRoot);
-  const leftRels = relationshipsById(leftRelsRoot);
-  const used = new Set(leftRels.keys());
+  const used = new Set(relationshipsById(leftRelsRoot).keys());
   const rewrites = new Map<string, string>();
 
   for (const el of descendantsAndSelf(root)) {
@@ -902,9 +901,8 @@ function importRightRelatedParts(
       if (rewrites.has(oldId)) continue;
       const rightRel = rightRels.get(oldId);
       if (!rightRel || rightRel.attribute(REL_TARGET_MODE) === 'External') continue;
-      const leftRel = leftRels.get(oldId);
-      if (leftRel && sameRelationship(leftRel, rightRel) && sameRelationshipTargetBytes(leftParts, rightParts, destPartName, leftRel, rightRel)) continue;
-      const imported = importRelationshipTarget(outParts, rightParts, destPartName, rightRel, leftRelsRoot, used);
+      if (isHeaderFooterRelationship(rightRel)) continue;
+      const imported = importRelationshipTarget(outParts, rightParts, sourcePartName, destPartName, rightRel, leftRelsRoot, used);
       if (imported) rewrites.set(oldId, imported);
     }
   }
@@ -1060,7 +1058,8 @@ function renumberNoteIds(
     }
   }
   for (const n of real) if (![...assigned.keys()].includes(n) && !ordered.includes(n)) ordered.push(n);
-  noteRoot.children.splice(0, noteRoot.children.length, ...reserved, ...ordered);
+  const nonNoteChildren = noteRoot.children.filter((c) => !(c instanceof XElement && nameEquals(c.name, noteName)));
+  noteRoot.children.splice(0, noteRoot.children.length, ...nonNoteChildren, ...reserved, ...ordered);
   for (const child of noteRoot.children) if (child instanceof XElement) child.parent = noteRoot;
   outParts.set(partName, strToU8(writeMainXmlPart(linqOutputShape(noteRoot))));
   return remap;
@@ -1106,6 +1105,7 @@ function replaceElementAttributes(el: XElement, name: XName, value: string): XEl
 function importRelationshipTarget(
   outParts: Map<string, Uint8Array>,
   rightParts: Record<string, Uint8Array>,
+  sourcePartName: string,
   destPartName: string,
   rightRel: XElement,
   destRelsRoot: XElement,
@@ -1114,7 +1114,7 @@ function importRelationshipTarget(
   const target = rightRel.attribute(REL_TARGET);
   const type = rightRel.attribute(REL_TYPE);
   if (!target || !type) return null;
-  const sourcePart = resolveTargetPart(destPartName, target);
+  const sourcePart = resolveTargetPart(sourcePartName, target);
   const bytes = rightParts[sourcePart];
   if (!bytes) return null;
   const contentType = contentTypeForPart(rightParts, sourcePart);
@@ -1124,15 +1124,14 @@ function importRelationshipTarget(
 
   const newId = freshImportedRelationshipId(used);
   used.add(newId);
-  const relativeTarget = relativeTargetFromPart(destPartName, importedPart);
-  const newRelationship = packageRelationship(type, relativeTarget, newId);
+  const newRelationship = packageRelationship(type, `/${importedPart}`, newId);
   destRelsRoot.children.push(newRelationship);
   newRelationship.parent = destRelsRoot;
 
   if (importedPart.toLowerCase().endsWith('.xml')) {
     const importedRoot = parseXml(strFromU8(bytes));
-    const fixedRoot = importRightRelatedParts(importedRoot, outParts, rightParts, rightParts, sourcePart);
-    outParts.set(importedPart, strToU8(writeXmlPart(fixedRoot)));
+    const fixedRoot = importRightRelatedParts(importedRoot, outParts, rightParts, sourcePart, importedPart);
+    if (fixedRoot !== importedRoot) outParts.set(importedPart, strToU8(writeMainXmlPart(fixedRoot)));
   }
   return newId;
 }
@@ -1220,6 +1219,11 @@ function sameRelationship(a: XElement, b: XElement): boolean {
   return a.attribute(REL_TYPE) === b.attribute(REL_TYPE) &&
     a.attribute(REL_TARGET) === b.attribute(REL_TARGET) &&
     a.attribute(REL_TARGET_MODE) === b.attribute(REL_TARGET_MODE);
+}
+
+function isHeaderFooterRelationship(rel: XElement): boolean {
+  const type = rel.attribute(REL_TYPE) ?? '';
+  return type === `${WORD_REL_PREFIX}header` || type === `${WORD_REL_PREFIX}footer`;
 }
 
 function sameRelationshipTargetBytes(

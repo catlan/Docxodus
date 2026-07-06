@@ -72,10 +72,7 @@ const KNOWN_DIVERGENT = new Set<string>([
   'WC052-SmartArt-Same.docx -> WC052-SmartArt-Same-Mod.docx',
   'self WC/WC-BodyBookmarks-Before.docx',
   'WC004-Large.docx -> WC004-Large-Mod.docx',
-  'WC013-Image-Before.docx -> WC013-Image-After.docx',
-  'WC013-Image-Before2.docx -> WC013-Image-After2.docx',
   'WC014-SmartArt-With-Image-Before.docx -> WC014-SmartArt-With-Image-After.docx',
-  'WC022-Image-Math-Para-Before.docx -> WC022-Image-Math-Para-After.docx',
   'WC023-Table-4-Row-Image-Before.docx -> WC023-Table-4-Row-Image-After-Delete-1-Row.docx',
   'WC034-Endnotes-Before.docx -> WC034-Endnotes-After3.docx',
   'WC034-Footnotes-Before.docx -> WC034-Footnotes-After3.docx',
@@ -83,8 +80,6 @@ const KNOWN_DIVERGENT = new Set<string>([
   'WC035-Footnote-Before.docx -> WC035-Footnote-After.docx',
   'WC059-Footnote.docx -> WC059-Footnote-Mod.docx',
   'WC060-Endnote.docx -> WC060-Endnote-Mod.docx',
-  'WC064-Footnote.docx -> WC064-Footnote-Mod.docx',
-  'WC067-Textbox-Image.docx -> WC067-Textbox-Image-Mod.docx',
 ]);
 
 
