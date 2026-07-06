@@ -5,45 +5,23 @@ import type { IrParagraph } from '../ir/ir-blocks.js';
 import type { IrBreakKind, IrRunFormat } from '../ir/ir-formats.js';
 import type { IrInline, IrTextbox } from '../ir/ir-inlines.js';
 import type { IrDiffToken } from './ir-diff-token.js';
+import {
+  defaultIrDiffSettings,
+  normalizeIrDiffSettings,
+  type IrDiffSettings,
+  type IrDiffSettingsOptions,
+} from './ir-diff-settings.js';
 
 const ATOMIC_SENTINEL = '\u0001';
 const INTERRUPTION_MARKER_PREFIX = '\u0001iw:';
 
-const DEFAULT_WORD_SEPARATORS = [
-  ' ',
-  '-',
-  ')',
-  '(',
-  ';',
-  ',',
-  '（',
-  '）',
-  '，',
-  '、',
-  '；',
-  '。',
-  '：',
-  '的',
-];
-
 /** Tokenizer settings subset read by IrDiffTokenizer. */
-export interface IrDiffTokenizerSettings {
-  /** Characters that split text into words vs one-token-per-char separators. */
-  readonly wordSeparators: ReadonlySet<string>;
-  /** Case-fold match keys per culture, or invariant when culture is null. */
-  readonly caseInsensitive: boolean;
-  /** When true, NBSP splits and folds like ordinary space; non-breaking hyphen stays distinct. */
-  readonly conflateBreakingAndNonbreakingSpaces: boolean;
-  /** BCP-47 locale used for case folding; null means invariant/locale-independent. */
-  readonly culture: string | null;
-}
+export type IrDiffTokenizerSettings = Pick<
+  IrDiffSettings,
+  'wordSeparators' | 'caseInsensitive' | 'conflateBreakingAndNonbreakingSpaces' | 'culture'
+>;
 
-export const defaultIrDiffTokenizerSettings: IrDiffTokenizerSettings = {
-  wordSeparators: new Set(DEFAULT_WORD_SEPARATORS),
-  caseInsensitive: false,
-  conflateBreakingAndNonbreakingSpaces: true,
-  culture: null,
-};
+export const defaultIrDiffTokenizerSettings: IrDiffTokenizerSettings = defaultIrDiffSettings;
 
 export type IrDiffTokenizerOptions = Partial<{
   readonly wordSeparators: Iterable<string>;
@@ -53,24 +31,13 @@ export type IrDiffTokenizerOptions = Partial<{
 }>;
 
 const normalizeSettings = (
-  options: IrDiffTokenizerOptions = {},
-): IrDiffTokenizerSettings => ({
-  wordSeparators:
-    options.wordSeparators === undefined
-      ? defaultIrDiffTokenizerSettings.wordSeparators
-      : new Set(options.wordSeparators),
-  caseInsensitive:
-    options.caseInsensitive ?? defaultIrDiffTokenizerSettings.caseInsensitive,
-  conflateBreakingAndNonbreakingSpaces:
-    options.conflateBreakingAndNonbreakingSpaces ??
-    defaultIrDiffTokenizerSettings.conflateBreakingAndNonbreakingSpaces,
-  culture: options.culture ?? defaultIrDiffTokenizerSettings.culture,
-});
+  options: IrDiffTokenizerOptions | IrDiffSettings = {},
+): IrDiffTokenizerSettings => normalizeIrDiffSettings(options as IrDiffSettingsOptions);
 
 /** Tokenize an IrParagraph into word/separator/atomic diff tokens. */
 export function tokenizeIrParagraph(
   paragraph: IrParagraph,
-  options: IrDiffTokenizerOptions = {},
+  options: IrDiffTokenizerOptions | IrDiffSettings = {},
 ): ReadonlyArray<IrDiffToken> {
   const settings = normalizeSettings(options);
   const state = { charOffset: 0 };
