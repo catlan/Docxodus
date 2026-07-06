@@ -66,7 +66,8 @@ export function renderIrMarkup(
   }
 
   const newBody = cloneElement(body, { children: newBodyChildren });
-  const newRoot = cloneElement(linqOutputShape(normalizeBookmarkMarkers(stripUnids(replaceChild(root, body, newBody)))), {
+  const normalized = normalizeBookmarks(stripUnids(replaceChild(root, body, newBody)), bodyBookmarkNames(left), bodyBookmarkNames(right));
+  const newRoot = cloneElement(linqOutputShape(normalized), {
     documentProlog: '<?xml version="1.0" encoding="utf-8" standalone="yes"?>\n',
   });
 
@@ -277,22 +278,13 @@ function buildTokenOpContent(
       case 'Insert': {
         const [s, e] = rightSpanChars(rightTokens, op);
         const [zs, ze] = zeroWidthBoundaries(rightTokens, op.rightStart, op.rightEnd);
-        for (const r of rightRuns.slice(s, e, zs, ze)) {
-          if (isBookmarkMarker(r.name)) revisionAttrs(state);
-          else content.push(...wrapFieldAware(r, 'Ins', state));
-        }
+        for (const r of rightRuns.slice(s, e, zs, ze)) content.push(...wrapFieldAware(r, 'Ins', state));
         break;
       }
       case 'Delete': {
         const [s, e] = leftSpanChars(leftTokens, op);
         const [zs, ze] = zeroWidthBoundaries(leftTokens, op.leftStart, op.leftEnd);
-        for (const r of leftRuns.slice(s, e, zs, ze)) {
-          if (isBookmarkMarker(r.name)) {
-            revisionAttrs(state); // C# emits then normalizes these wrappers away; ids are still consumed.
-            content.push(r);
-          }
-          else content.push(...wrapFieldAware(r, 'Del', state));
-        }
+        for (const r of leftRuns.slice(s, e, zs, ze)) content.push(...wrapFieldAware(r, 'Del', state));
         break;
       }
     }
@@ -546,8 +538,8 @@ class SourceRunModel {
   private nextHyperlinkOrdinal = 0;
 
   constructor(para: XElement) {
-    let offset = 0;
-    for (const child of childrenElements(para).filter((e) => !nameEquals(e.name, W.pPr))) this.walkRunLevel(child, { value: offset }, []);
+    const offset = { value: 0 };
+    for (const child of childrenElements(para).filter((e) => !nameEquals(e.name, W.pPr))) this.walkRunLevel(child, offset, []);
   }
 
   private walkRunLevel(runLevel: XElement, offset: { value: number }, chain: XElement[]): void {
@@ -785,26 +777,195 @@ function linqOutputShape(el: XElement): XElement {
   }));
 }
 
-function normalizeBookmarkMarkers(root: XElement): XElement {
-  return transformDescendants(root, (node) => {
-    if (!nameEquals(node.name, W.p)) return null;
-    const seenStarts = new Set<string>();
-    const seenEnds = new Set<string>();
-    const children = node.children.filter((child) => {
-      if (!(child instanceof XElement)) return true;
-      if (nameEquals(child.name, W.bookmarkStart)) {
-        const key = `${child.attribute(W.id) ?? ''}\0${child.attribute(W.name) ?? ''}`;
-        if (seenStarts.has(key)) return false;
-        seenStarts.add(key);
-      } else if (nameEquals(child.name, W.bookmarkEnd)) {
-        const key = child.attribute(W.id) ?? '';
-        if (seenEnds.has(key)) return false;
-        seenEnds.add(key);
-      }
-      return true;
+function normalizeBookmarks(root: XElement, leftNames: ReadonlySet<string>, rightNames: ReadonlySet<string>): XElement {
+  const body = root.element(W.body);
+  if (!body) return root;
+  let starts = runLevelBookmarks(body, W.bookmarkStart);
+  let ends = runLevelBookmarks(body, W.bookmarkEnd);
+  if (starts.length === 0 && ends.length === 0) return root;
+
+  for (const [name, nameStarts] of groupBy(starts.filter((s) => (s.attribute(W.name) ?? '') !== ''), (s) => s.attribute(W.name)!)) {
+    const ids = new Set(nameStarts.map(idOf).filter((id): id is string => id !== null));
+    const nameEnds = ends.filter((e) => {
+      const id = idOf(e);
+      return id !== null && ids.has(id);
     });
-    return cloneElement(node, { children });
-  });
+    if (!leftNames.has(name) || !rightNames.has(name)) continue;
+    if ([...nameStarts, ...nameEnds].some(isInWholeBlockRevisedParagraph)) continue;
+
+    const keepStart = nameStarts[0]!;
+    const keepEnd = nameEnds[0] ?? null;
+    for (const s of nameStarts) if (s !== keepStart) removeBookmarkMarker(s);
+    for (const e of nameEnds) if (e !== keepEnd) removeBookmarkMarker(e);
+    liftBookmarkBare(keepStart);
+    if (keepEnd) liftBookmarkBare(keepEnd);
+  }
+
+  starts = runLevelBookmarks(body, W.bookmarkStart);
+  ends = runLevelBookmarks(body, W.bookmarkEnd);
+  const liveStarts = groupBy(starts, (s) => idOf(s) ?? '');
+  const liveEnds = groupBy(ends, (e) => idOf(e) ?? '');
+  const dupIds = new Set<string>();
+  for (const [id, list] of liveStarts) if (list.length > 1) dupIds.add(id);
+  for (const [id, list] of liveEnds) if (list.length > 1) dupIds.add(id);
+  if (dupIds.size > 0) {
+    let next = globalMaxBookmarkId(root) + 1;
+    for (const id of dupIds) {
+      const ss = liveStarts.get(id) ?? [];
+      const es = liveEnds.get(id) ?? [];
+      const copies = Math.max(ss.length, es.length);
+      for (let k = 1; k < copies; k++) {
+        const fresh = String(next++);
+        if (k < ss.length) replaceElementInParent(ss[k]!, withAttribute(ss[k]!, W.id, fresh));
+        if (k < es.length) replaceElementInParent(es[k]!, withAttribute(es[k]!, W.id, fresh));
+      }
+    }
+  }
+
+  starts = runLevelBookmarks(body, W.bookmarkStart);
+  ends = runLevelBookmarks(body, W.bookmarkEnd);
+  const startById = groupBy(starts, (s) => idOf(s) ?? '');
+  const endById = groupBy(ends, (e) => idOf(e) ?? '');
+  for (const [id, sl] of startById) {
+    const have = endById.get(id)?.length ?? 0;
+    for (let k = have; k < sl.length; k++) insertAfter(sl[k]!, element(W.bookmarkEnd, [attr(W.id, id)]));
+  }
+  for (const [id, el] of endById) {
+    const have = startById.get(id)?.length ?? 0;
+    for (let k = have; k < el.length; k++) removeBookmarkMarker(el[k]!);
+  }
+  return root;
+}
+
+function bodyBookmarkNames(doc: IrDocument): Set<string> {
+  const names = new Set<string>();
+  for (const block of doc.body.blocks) {
+    const el = block.source.element;
+    if (!el) continue;
+    for (const bk of descendantsAndSelf(el).filter((e) => nameEquals(e.name, W.bookmarkStart))) {
+      const name = bk.attribute(W.name);
+      if (name) names.add(name);
+    }
+  }
+  return names;
+}
+
+function runLevelBookmarks(root: XElement, name: XName): XElement[] {
+  return [...root.descendants(name)].filter(isRunLevelBookmark);
+}
+
+function isRunLevelBookmark(marker: XElement): boolean {
+  for (let a = marker.parent; a; a = a.parent) {
+    if (nameEquals(a.name, W.p) || nameEquals(a.name, W.body) || nameEquals(a.name, W.tc)) return true;
+    if (
+      !nameEquals(a.name, W.ins) &&
+      !nameEquals(a.name, W.del) &&
+      !nameEquals(a.name, W.hyperlink) &&
+      !nameEquals(a.name, W.sdt) &&
+      !nameEquals(a.name, W.sdtContent) &&
+      !nameEquals(a.name, W.smartTag) &&
+      !nameEquals(a.name, W.fldSimple)
+    ) return false;
+  }
+  return false;
+}
+
+function isInWholeBlockRevisedParagraph(marker: XElement): boolean {
+  for (let a = marker.parent; a; a = a.parent) {
+    if (!nameEquals(a.name, W.p)) continue;
+    const mark = a.element(W.pPr)?.element(W.rPr);
+    return !!mark?.element(W.del) || !!mark?.element(W.ins);
+  }
+  return false;
+}
+
+function removeBookmarkMarker(marker: XElement): void {
+  const parent = marker.parent;
+  if (!parent) return;
+  removeChild(parent, marker);
+  if ((nameEquals(parent.name, W.ins) || nameEquals(parent.name, W.del)) && parent.parent && childrenElements(parent).length === 0) {
+    removeChild(parent.parent, parent);
+  }
+}
+
+function liftBookmarkBare(marker: XElement): boolean {
+  const parent = marker.parent;
+  const grand = parent?.parent ?? null;
+  if (!parent || !grand || (!nameEquals(parent.name, W.ins) && !nameEquals(parent.name, W.del))) return false;
+  removeChild(parent, marker);
+  if (nameEquals(marker.name, W.bookmarkEnd)) insertAfter(parent, marker);
+  else insertBefore(parent, marker);
+  if (childrenElements(parent).length === 0 && parent.parent) removeChild(parent.parent, parent);
+  return true;
+}
+
+function idOf(el: XElement): string | null {
+  return el.attribute(W.id);
+}
+
+function globalMaxBookmarkId(root: XElement): number {
+  let max = 0;
+  for (const el of root.descendants()) {
+    if (!nameEquals(el.name, W.bookmarkStart) && !nameEquals(el.name, W.bookmarkEnd)) continue;
+    const id = el.attribute(W.id);
+    if (id && /^\d+$/.test(id)) max = Math.max(max, Number(id));
+  }
+  return max;
+}
+
+function withAttribute(el: XElement, name: XName, value: string | number): XElement {
+  const attrs = [...el.attributeInfos()];
+  const replacement = attr(name, value);
+  const idx = attrs.findIndex((a) => nameEquals(a.name, name));
+  if (idx >= 0) attrs.splice(idx, 1, replacement);
+  else attrs.push(replacement);
+  return cloneElement(el, { attributes: attrs });
+}
+
+function replaceElementInParent(oldElement: XElement, replacement: XElement): void {
+  const parent = oldElement.parent;
+  if (!parent) return;
+  const idx = parent.children.indexOf(oldElement);
+  if (idx < 0) return;
+  parent.children[idx] = replacement;
+  replacement.parent = parent;
+  oldElement.parent = null;
+}
+
+function removeChild(parent: XElement, child: XElement): void {
+  const idx = parent.children.indexOf(child);
+  if (idx < 0) return;
+  parent.children.splice(idx, 1);
+  child.parent = null;
+}
+
+function insertBefore(ref: XElement, child: XElement): void {
+  const parent = ref.parent;
+  if (!parent) return;
+  const idx = parent.children.indexOf(ref);
+  if (idx < 0) return;
+  parent.children.splice(idx, 0, child);
+  child.parent = parent;
+}
+
+function insertAfter(ref: XElement, child: XElement): void {
+  const parent = ref.parent;
+  if (!parent) return;
+  const idx = parent.children.indexOf(ref);
+  if (idx < 0) return;
+  parent.children.splice(idx + 1, 0, child);
+  child.parent = parent;
+}
+
+function groupBy<T, K>(items: Iterable<T>, key: (item: T) => K): Map<K, T[]> {
+  const map = new Map<K, T[]>();
+  for (const item of items) {
+    const k = key(item);
+    const list = map.get(k);
+    if (list) list.push(item);
+    else map.set(k, [item]);
+  }
+  return map;
 }
 
 function replaceChildrenInPlace(el: XElement, replace: (child: XChild) => XChild): void {
@@ -835,7 +996,6 @@ function isSectionBreakOp(op: IrEditOp, state: RenderState): boolean {
 function revElementName(kind: RevKind): XName { return kind === 'Ins' ? W.ins : kind === 'Del' ? W.del : kind === 'MoveFrom' ? W.moveFrom : W.moveTo; }
 function isDeleteGrade(kind: RevKind): boolean { return kind === 'Del' || kind === 'MoveFrom'; }
 function isAlwaysKeepMarker(name: XName): boolean { return nameEquals(name, W.bookmarkStart) || nameEquals(name, W.bookmarkEnd) || nameEquals(name, W.commentRangeStart) || nameEquals(name, W.commentRangeEnd); }
-function isBookmarkMarker(name: XName): boolean { return nameEquals(name, W.bookmarkStart) || nameEquals(name, W.bookmarkEnd); }
 function fieldPlumbingKeep(name: XName): boolean { return nameEquals(name, W.fldChar) || nameEquals(name, W.instrText) || nameEquals(name, W.delInstrText); }
 function isContainer(name: XName): boolean { return nameEquals(name, W.hyperlink) || nameEquals(name, W.ins) || nameEquals(name, W.del) || nameEquals(name, W.sdt) || nameEquals(name, W.smartTag); }
 function preserveSpace(s: string): boolean { return s.length > 0 && (/\s/.test(s[0]!) || /\s/.test(s[s.length - 1]!)); }
