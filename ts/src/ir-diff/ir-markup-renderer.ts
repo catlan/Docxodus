@@ -99,13 +99,34 @@ export function renderIrMarkup(
   remapNestedNoteReferences(result, footnoteRemap, endnoteRemap);
   const normalized = normalizeBookmarks(imported, bodyBookmarkNames(left), bodyBookmarkNames(right));
   const remapped = remapHyperlinkRelationshipCollisions(normalized, leftParts, rightParts);
-  const newRoot = cloneElement(linqOutputShape(remapped.root), {
-    documentProlog: '<?xml version="1.0" encoding="utf-8" standalone="yes"?>\n',
+  const outputShape = linqOutputShape(remapped.root);
+  const newRoot = cloneElement(outputShape, {
+    documentProlog: hasRevisionMarkup(rightParts['word/document.xml']) && !hasRenderedRevisionMarkup(outputShape)
+      ? '<?xml version="1.0" encoding="utf-8"?>'
+      : '<?xml version="1.0" encoding="utf-8" standalone="yes"?>\n',
   });
 
   result.set('word/document.xml', strToU8(writeXmlPart(newRoot)));
   if (remapped.relationshipsXml) result.set('word/_rels/document.xml.rels', strToU8(remapped.relationshipsXml));
   return result;
+}
+
+function hasRevisionMarkup(bytes: Uint8Array | undefined): boolean {
+  if (!bytes) return false;
+  return /\bw:(?:ins|del|moveFrom|moveTo|rPrChange|pPrChange|tblPrChange|trPrChange|tcPrChange|sectPrChange|delText|delInstrText)\b/.test(strFromU8(bytes));
+}
+
+function hasRenderedRevisionMarkup(root: XElement): boolean {
+  for (const el of root.descendants()) {
+    if (
+      nameEquals(el.name, W.ins) || nameEquals(el.name, W.del) ||
+      nameEquals(el.name, W.moveFrom) || nameEquals(el.name, W.moveTo) ||
+      nameEquals(el.name, W.rPrChange) || nameEquals(el.name, W.pPrChange) ||
+      nameEquals(el.name, W.tblPrChange) || nameEquals(el.name, W.trPrChange) ||
+      nameEquals(el.name, W.tcPrChange) || nameEquals(el.name, W.sectPrChange)
+    ) return true;
+  }
+  return false;
 }
 
 function renderBlockOp(op: IrEditOp, state: RenderState, sink: XElement[]): void {

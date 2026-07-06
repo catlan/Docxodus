@@ -36,3 +36,5 @@ export * from './ir/ir-content-hash-builder.js';
 export * from './ir/ir-canonicalize.js';
 export * from './ir/kind-for.js';
 export * from './ir/ir-reader.js';
+export * from './ir/revision-view.js';
+export * from './docx-diff.js';

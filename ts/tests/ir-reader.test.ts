@@ -115,7 +115,7 @@ describe('IrReader stage A', () => {
   });
 
   test('unknown elements become opaque', () => {
-    const ir = readIrDocument(parts('<w:customXmlInsRangeStart w:id="1"/><w:p><w:r><w:ptab w:relativeTo="margin"/></w:r></w:p>'));
+    const ir = readIrDocument(parts('<w:unknownBlock w:id="1"/><w:p><w:r><w:ptab w:relativeTo="margin"/></w:r></w:p>'), { revisionView: 'raw' });
     expect(ir.body.blocks.some((b) => b.kind === 'opaqueBlock')).toBe(true);
     const para = ir.body.blocks.find((b): b is IrParagraph => b.kind === 'paragraph')!;
     expect(para.inlines.some((i) => i.kind === 'opaqueInline')).toBe(true);
@@ -128,10 +128,12 @@ describe('IrReader stage A', () => {
     expect(plain.formatFingerprint).not.toBe(bold.formatFingerprint);
   });
 
-  test('stage A throws clearly on body revisions', () => {
+  test('accepted revision view is default and fail mode still rejects body revisions', () => {
+    const input = parts('<w:p><w:r><w:t xml:space="preserve">kept </w:t></w:r><w:ins w:id="1"><w:r><w:t>inserted</w:t></w:r></w:ins></w:p>');
+    expect(text(readIrDocument(input).body.blocks[0] as IrParagraph)).toBe('kept inserted');
     expect(() =>
-      readIrDocument(parts('<w:p><w:r><w:t xml:space="preserve">kept </w:t></w:r><w:ins w:id="1"><w:r><w:t>inserted</w:t></w:r></w:ins></w:p>')),
-    ).toThrow(/revision-free/);
+      readIrDocument(input, { revisionView: 'failIfPresent' }),
+    ).toThrow(/revision-free XML/);
   });
 
   test('trailing sectPr becomes section break', () => {

@@ -92,6 +92,7 @@ export const W = {
   pgSz: xname(W_NS, 'pgSz'),
   pgMar: xname(W_NS, 'pgMar'),
   sectPr: xname(W_NS, 'sectPr'),
+  lang: xname(W_NS, 'lang'),
   ins: xname(W_NS, 'ins'),
   del: xname(W_NS, 'del'),
   delText: xname(W_NS, 'delText'),
@@ -112,6 +113,23 @@ export const W = {
   cellIns: xname(W_NS, 'cellIns'),
   cellDel: xname(W_NS, 'cellDel'),
   cellMerge: xname(W_NS, 'cellMerge'),
+  numberingChange: xname(W_NS, 'numberingChange'),
+  rsid: xname(W_NS, 'rsid'),
+  rsidDel: xname(W_NS, 'rsidDel'),
+  rsidP: xname(W_NS, 'rsidP'),
+  rsidR: xname(W_NS, 'rsidR'),
+  rsidRDefault: xname(W_NS, 'rsidRDefault'),
+  rsidRPr: xname(W_NS, 'rsidRPr'),
+  rsidSect: xname(W_NS, 'rsidSect'),
+  rsidTr: xname(W_NS, 'rsidTr'),
+  customXmlDelRangeStart: xname(W_NS, 'customXmlDelRangeStart'),
+  customXmlDelRangeEnd: xname(W_NS, 'customXmlDelRangeEnd'),
+  customXmlInsRangeStart: xname(W_NS, 'customXmlInsRangeStart'),
+  customXmlInsRangeEnd: xname(W_NS, 'customXmlInsRangeEnd'),
+  customXmlMoveFromRangeStart: xname(W_NS, 'customXmlMoveFromRangeStart'),
+  customXmlMoveFromRangeEnd: xname(W_NS, 'customXmlMoveFromRangeEnd'),
+  customXmlMoveToRangeStart: xname(W_NS, 'customXmlMoveToRangeStart'),
+  customXmlMoveToRangeEnd: xname(W_NS, 'customXmlMoveToRangeEnd'),
   footnote: xname(W_NS, 'footnote'),
   endnote: xname(W_NS, 'endnote'),
   headerReference: xname(W_NS, 'headerReference'),
@@ -138,6 +156,13 @@ export const REL = {
 export const A_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main';
 export const A = {
   blip: xname(A_NS, 'blip'),
+} as const satisfies Record<string, XName>;
+
+export const M_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/math';
+export const M = {
+  f: xname(M_NS, 'f'),
+  fPr: xname(M_NS, 'fPr'),
+  ctrlPr: xname(M_NS, 'ctrlPr'),
 } as const satisfies Record<string, XName>;
 
 export const WP_NS =

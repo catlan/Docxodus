@@ -38,6 +38,7 @@ import { emptyIrProvenance, type IrProvenance } from './ir-provenance.js';
 import { kindFor, isListItem } from './kind-for.js';
 import { A, R, REL, W, WP } from './names.js';
 import { assignToAllElementsDeterministic, type UnidMap } from './unid-helper.js';
+import { applyRevisionViewToParts, type RevisionView } from './revision-view.js';
 
 export interface IrScope {
   readonly name: string;
@@ -60,6 +61,7 @@ export interface IrDocument {
 
 export interface IrReaderOptions {
   readonly retainSources?: boolean;
+  readonly revisionView?: RevisionView;
 }
 
 interface IrStyle {
@@ -152,7 +154,8 @@ export function readIrDocument(
   options: IrReaderOptions = {},
 ): IrDocument {
   const retainSources = options.retainSources === true;
-  const parts = partsOrDocx instanceof Uint8Array ? unzipSync(partsOrDocx) : partsOrDocx;
+  const rawParts = partsOrDocx instanceof Uint8Array ? unzipSync(partsOrDocx) : partsOrDocx;
+  const parts = applyRevisionViewToParts(rawParts, options.revisionView ?? 'accept');
   const documentXml = getPartText(parts, 'word/document.xml');
   if (documentXml === null) throw new Error('Document has no word/document.xml part.');
   const root = parseXml(documentXml);

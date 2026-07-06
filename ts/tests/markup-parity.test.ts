@@ -49,16 +49,8 @@ describe('native markup renderer full-part parity with C# oracle', () => {
 });
 
 function markupSkipReason(leftName: string, rightName: string): string | null {
-  const pair = `${leftName} ${rightName}`;
-  if (
-    pair.includes('WC012-Math-Before.docx WC012-Math-After.docx') ||
-    pair.includes('WC053-Text-in-Cell.docx WC053-Text-in-Cell-Mod.docx') ||
-    pair.includes('WC054-Text-in-Cell.docx WC054-Text-in-Cell-Mod.docx') ||
-    pair.includes('WC057-Table-Merged-Cell.docx WC057-Table-Merged-Cell-Mod.docx')
-  ) {
-    return 'stage-A reader requires revision-free body XML';
-  }
-  if (/-Ins(?:\.|-)/i.test(pair)) return 'stage-A reader requires revision-free body XML';
+  void leftName;
+  void rightName;
   return null;
 }
 
