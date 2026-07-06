@@ -25,6 +25,7 @@ export * from './ir-diff/ir-edit-script-builder.js';
 export * from './ir-diff/ir-edit-script-json.js';
 export * from './ir-diff/ir-revision.js';
 export * from './ir-diff/ir-revision-renderer.js';
+export * from './ir-diff/ir-markup-renderer.js';
 export * from './ir-diff/ir-table-differ.js';
 export * from './ir-diff/ir-split-segmenter.js';
 export * from './ir-diff/ir-block-alignment.js';
