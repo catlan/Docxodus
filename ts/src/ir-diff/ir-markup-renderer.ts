@@ -1,6 +1,6 @@
 import { unzipSync, strFromU8, strToU8 } from 'fflate';
 import { anchorToString } from '../ir/ir-anchor.js';
-import { W, W_NS, PT_NS, R, R_NS, REL } from '../ir/names.js';
+import { W, W_NS, M_NS, PT_NS, R, R_NS, REL } from '../ir/names.js';
 import type { IrBlock, IrParagraph, IrTable } from '../ir/ir-blocks.js';
 import { readIrDocument, type IrDocument } from '../ir/ir-reader.js';
 import { tokenizeIrParagraph } from './ir-diff-tokenizer.js';
@@ -952,12 +952,51 @@ function importRightSourcedMedia(
   const rightRels = relationshipsById(rightRelsRoot);
   const destRelsName = relsPartName('word/document.xml');
   const destRelsRoot = ensureRelationshipsRoot(outParts, destRelsName);
+  // The C# ImportHyperlinkAndExternalRelationships free-id half runs BEFORE the media import:
+  // a right-only hyperlink/external id referenced by a clone is recreated under the SAME id so
+  // the cloned @r:id keeps resolving. (Colliding ids — same id, different target — stay with the
+  // downstream remapHyperlinkRelationshipCollisions pass.)
+  let changed = importExternalRelationships(state.rightSourcedClones, rightRels, destRelsRoot);
   const used = new Set(relationshipsById(destRelsRoot).keys());
-  let changed = false;
   for (const clone of state.rightSourcedClones) {
     if (importCloneMedia(clone, rightRels, 'word/document.xml', destRelsRoot, used, outParts, rightParts, true)) changed = true;
   }
   if (changed) outParts.set(destRelsName, strToU8(writeRelationshipsPart(destRelsRoot)));
+}
+
+/** Recreate hyperlink/External relationships referenced by the clones whose ids are FREE in the
+ * destination rels — the C# ImportHyperlinkAndExternalRelationships same-id path. External-mode
+ * targets are not package parts, so the media part-copy path skips them; without recreation an
+ * inserted right-only hyperlink's @r:id dangles in the output. */
+function importExternalRelationships(
+  clones: readonly XElement[],
+  sourceRels: ReadonlyMap<string, XElement>,
+  destRelsRoot: XElement,
+): boolean {
+  const destIds = new Set(relationshipsById(destRelsRoot).keys());
+  const referenced = new Set<string>();
+  for (const clone of clones) {
+    for (const el of descendantsAndSelf(clone)) {
+      for (const a of el.attributeInfos()) {
+        if (a.name.ns === R_NS && a.value) referenced.add(a.value);
+      }
+    }
+  }
+  let changed = false;
+  for (const id of referenced) {
+    if (destIds.has(id)) continue;
+    const rel = sourceRels.get(id);
+    if (!rel || rel.attribute(REL_TARGET_MODE) !== 'External') continue;
+    const type = rel.attribute(REL_TYPE);
+    const target = rel.attribute(REL_TARGET);
+    if (!type || !target) continue;
+    const copy = packageRelationship(type, target, id, 'External');
+    destRelsRoot.children.push(copy);
+    copy.parent = destRelsRoot;
+    destIds.add(id);
+    changed = true;
+  }
+  return changed;
 }
 
 function importCloneMedia(
@@ -1241,17 +1280,70 @@ function insertIntoSectPr(sectPr: XElement, el: XElement): void {
   el.parent = sectPr;
 }
 
-/** Ensure the settings part carries w:evenAndOddHeaders (required for an Even story to render). */
+/** Ensure the settings part carries w:evenAndOddHeaders (required for an Even story to render).
+ * A missing settings part is created AND wired into the package (content-type override +
+ * main-document relationship — the C# AddNewPart<DocumentSettingsPart>() side effects); the
+ * children are then reordered per CT_Settings, mirroring WmlOrderElementsPerStandard's stable
+ * sort with unknown names last. */
 function ensureEvenAndOddHeaders(outParts: Map<string, Uint8Array>): void {
   const settingsName = 'word/settings.xml';
   const bytes = outParts.get(settingsName);
+  if (!bytes) {
+    addContentTypeOverride(outParts, settingsName,
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml');
+    ensureDocumentRelationship(outParts, settingsName, 'settings');
+  }
   const root = bytes ? parseXml(strFromU8(bytes)) : element(xname(W_NS, 'settings'), [attr(xname(XMLNS_NS, 'w'), W_NS)]);
   const flagName = xname(W_NS, 'evenAndOddHeaders');
   if (root.element(flagName)) return;
   const flag = element(flagName);
   root.children.push(flag);
   flag.parent = root;
+  const ordered = [...childrenElements(root)].sort((a, b) => settingsElementOrder(a) - settingsElementOrder(b));
+  root.children.splice(0, root.children.length, ...ordered);
+  for (const child of root.children) if (child instanceof XElement) child.parent = root;
   outParts.set(settingsName, strToU8(writeNoteXmlPart(linqOutputShape(root))));
+}
+
+// CT_Settings element sequence (PtOpenXmlUtil.Order_settings); unknown names sort last (999).
+const SETTINGS_ORDER = new Map<string, number>([
+  ['writeProtection', 10], ['view', 20], ['zoom', 30], ['removePersonalInformation', 40],
+  ['removeDateAndTime', 50], ['doNotDisplayPageBoundaries', 60], ['displayBackgroundShape', 70],
+  ['printPostScriptOverText', 80], ['printFractionalCharacterWidth', 90], ['printFormsData', 100],
+  ['embedTrueTypeFonts', 110], ['embedSystemFonts', 120], ['saveSubsetFonts', 130],
+  ['saveFormsData', 140], ['mirrorMargins', 150], ['alignBordersAndEdges', 160],
+  ['bordersDoNotSurroundHeader', 170], ['bordersDoNotSurroundFooter', 180], ['gutterAtTop', 190],
+  ['hideSpellingErrors', 200], ['hideGrammaticalErrors', 210], ['activeWritingStyle', 220],
+  ['proofState', 230], ['formsDesign', 240], ['attachedTemplate', 250], ['linkStyles', 260],
+  ['stylePaneFormatFilter', 270], ['stylePaneSortMethod', 280], ['documentType', 290],
+  ['mailMerge', 300], ['revisionView', 310], ['trackRevisions', 320], ['doNotTrackMoves', 330],
+  ['doNotTrackFormatting', 340], ['documentProtection', 350], ['autoFormatOverride', 360],
+  ['styleLockTheme', 370], ['styleLockQFSet', 380], ['defaultTabStop', 390],
+  ['autoHyphenation', 400], ['consecutiveHyphenLimit', 410], ['hyphenationZone', 420],
+  ['doNotHyphenateCaps', 430], ['showEnvelope', 440], ['summaryLength', 450],
+  ['clickAndTypeStyle', 460], ['defaultTableStyle', 470], ['evenAndOddHeaders', 480],
+  ['bookFoldRevPrinting', 490], ['bookFoldPrinting', 500], ['bookFoldPrintingSheets', 510],
+  ['drawingGridHorizontalSpacing', 520], ['drawingGridVerticalSpacing', 530],
+  ['displayHorizontalDrawingGridEvery', 540], ['displayVerticalDrawingGridEvery', 550],
+  ['doNotUseMarginsForDrawingGridOrigin', 560], ['drawingGridHorizontalOrigin', 570],
+  ['drawingGridVerticalOrigin', 580], ['doNotShadeFormData', 590], ['noPunctuationKerning', 600],
+  ['characterSpacingControl', 610], ['printTwoOnOne', 620], ['strictFirstAndLastChars', 630],
+  ['noLineBreaksAfter', 640], ['noLineBreaksBefore', 650], ['savePreviewPicture', 660],
+  ['doNotValidateAgainstSchema', 670], ['saveInvalidXml', 680], ['ignoreMixedContent', 690],
+  ['alwaysShowPlaceholderText', 700], ['doNotDemarcateInvalidXml', 710], ['saveXmlDataOnly', 720],
+  ['useXSLTWhenSaving', 730], ['saveThroughXslt', 740], ['showXMLTags', 750],
+  ['alwaysMergeEmptyNamespace', 760], ['updateFields', 770], ['footnotePr', 780],
+  ['endnotePr', 790], ['compat', 800], ['docVars', 810], ['rsids', 820], ['attachedSchema', 840],
+  ['themeFontLang', 850], ['clrSchemeMapping', 860], ['doNotIncludeSubdocsInStats', 870],
+  ['doNotAutoCompressPictures', 880], ['forceUpgrade', 890], ['readModeInkLockDown', 910],
+  ['smartTagType', 920], ['doNotEmbedSmartTags', 940], ['decimalSymbol', 950],
+  ['listSeparator', 960],
+]);
+
+function settingsElementOrder(el: XElement): number {
+  if (el.name.ns === M_NS && el.name.local === 'mathPr') return 830;
+  if (el.name.ns !== W_NS) return 999;
+  return SETTINGS_ORDER.get(el.name.local) ?? 999;
 }
 
 function freshHeaderFooterPartName(outParts: ReadonlyMap<string, Uint8Array>, isHeader: boolean): string {
@@ -1284,8 +1376,8 @@ function importStorySourcedRelationships(
   const rightRels = relationshipsById(rightRelsRoot);
   const destRelsName = relsPartName(outputPartName);
   const destRelsRoot = ensureRelationshipsRoot(outParts, destRelsName);
+  let changed = importExternalRelationships(storyClones, rightRels, destRelsRoot);
   const used = new Set(relationshipsById(destRelsRoot).keys());
-  let changed = false;
   for (const clone of storyClones) {
     if (importCloneMedia(clone, rightRels, rightPartName, destRelsRoot, used, outParts, rightParts, true)) changed = true;
   }
@@ -1402,10 +1494,16 @@ function ensureRelationshipsRoot(parts: Map<string, Uint8Array>, name: string): 
 }
 
 function ensureMainRelationship(parts: Map<string, Uint8Array>, partName: string, noteName: XName): void {
+  ensureDocumentRelationship(parts, partName, nameEquals(noteName, W.footnote) ? 'footnotes' : 'endnotes');
+}
+
+/** Ensure word/_rels/document.xml.rels carries a relationship of the given word type suffix to
+ * the part (no-op when one already exists) — the relationship half of C#'s AddNewPart side effects. */
+function ensureDocumentRelationship(parts: Map<string, Uint8Array>, partName: string, relTypeSuffix: string): void {
   const relsName = relsPartName('word/document.xml');
   const root = ensureRelationshipsRoot(parts, relsName);
   const target = `/${partName}`;
-  const type = `${WORD_REL_PREFIX}${nameEquals(noteName, W.footnote) ? 'footnotes' : 'endnotes'}`;
+  const type = `${WORD_REL_PREFIX}${relTypeSuffix}`;
   for (const rel of childrenElements(root, REL.Relationship)) {
     if (rel.attribute(REL_TYPE) === type && rel.attribute(REL_TARGET) === target) return;
   }
