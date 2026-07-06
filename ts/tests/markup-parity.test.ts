@@ -75,24 +75,14 @@ const KNOWN_DIVERGENT = new Set<string>([
   'WC013-Image-Before.docx -> WC013-Image-After.docx',
   'WC013-Image-Before2.docx -> WC013-Image-After2.docx',
   'WC014-SmartArt-With-Image-Before.docx -> WC014-SmartArt-With-Image-After.docx',
-  'WC019-Hyperlink-Before.docx -> WC019-Hyperlink-After-2.docx',
-  'WC020-FootNote-Before.docx -> WC020-FootNote-After-1.docx',
-  'WC020-FootNote-Before.docx -> WC020-FootNote-After-2.docx',
   'WC022-Image-Math-Para-Before.docx -> WC022-Image-Math-Para-After.docx',
   'WC023-Table-4-Row-Image-Before.docx -> WC023-Table-4-Row-Image-After-Delete-1-Row.docx',
-  'WC034-Endnotes-Before.docx -> WC034-Endnotes-After1.docx',
-  'WC034-Endnotes-Before.docx -> WC034-Endnotes-After2.docx',
   'WC034-Endnotes-Before.docx -> WC034-Endnotes-After3.docx',
-  'WC034-Footnotes-Before.docx -> WC034-Footnotes-After1.docx',
-  'WC034-Footnotes-Before.docx -> WC034-Footnotes-After2.docx',
   'WC034-Footnotes-Before.docx -> WC034-Footnotes-After3.docx',
   'WC035-Endnote-Before.docx -> WC035-Endnote-After.docx',
   'WC035-Footnote-Before.docx -> WC035-Footnote-After.docx',
-  'WC036-Endnote-With-Table-Before.docx -> WC036-Endnote-With-Table-After.docx',
-  'WC036-Footnote-With-Table-Before.docx -> WC036-Footnote-With-Table-After.docx',
   'WC059-Footnote.docx -> WC059-Footnote-Mod.docx',
   'WC060-Endnote.docx -> WC060-Endnote-Mod.docx',
-  'WC063-Footnote.docx -> WC063-Footnote-Mod.docx',
   'WC064-Footnote.docx -> WC064-Footnote-Mod.docx',
   'WC067-Textbox-Image.docx -> WC067-Textbox-Image-Mod.docx',
 ]);
@@ -181,7 +171,7 @@ function normalizeGeneratedPartName(name: string): string {
 
 function normalizeGeneratedIds(xml: string): string {
   const normalized = xml
-    .replace(/R[0-9a-f]{32}/gi, 'RGEN')
+    .replace(/R[0-9a-f]{16,32}/gi, 'RGEN')
     .replace(/P[0-9a-f]{32}(?=\.)/gi, 'PGEN');
   return normalized;
 }

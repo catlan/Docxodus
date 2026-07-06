@@ -17,6 +17,7 @@ type RevKind = 'Ins' | 'Del' | 'MoveFrom' | 'MoveTo';
 const XML_NS = 'http://www.w3.org/XML/1998/namespace';
 const XML_SPACE = xname(XML_NS, 'space');
 const REL_NS = 'http://schemas.openxmlformats.org/package/2006/relationships';
+const XMLNS_NS = 'http://www.w3.org/2000/xmlns/';
 const REL_HYPERLINK = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink';
 const SOURCE_LINK_ID = xname(PT_NS, 'SourceLinkId');
 const REL_ID = xname('', 'Id');
@@ -27,10 +28,15 @@ const CONTENT_TYPES = '[Content_Types].xml';
 const CT_NS = 'http://schemas.openxmlformats.org/package/2006/content-types';
 const CT_TYPES = xname(CT_NS, 'Types');
 const CT_OVERRIDE = xname(CT_NS, 'Override');
+const CT_DEFAULT = xname(CT_NS, 'Default');
 const CT_PART_NAME = xname('', 'PartName');
 const CT_CONTENT_TYPE = xname('', 'ContentType');
+const CT_EXTENSION = xname('', 'Extension');
 const W_FOOTNOTES = xname(W_NS, 'footnotes');
 const W_ENDNOTES = xname(W_NS, 'endnotes');
+const WORD_REL_PREFIX = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/';
+const CT_FOOTNOTES = 'application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml';
+const CT_ENDNOTES = 'application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml';
 
 interface RenderState {
   readonly left: IrDocument;
@@ -869,7 +875,7 @@ function remapHyperlinkRelationshipCollisions(
 
   const rewrittenRoot = rewriteInsertedHyperlinkIds(root, remap);
   const rewrittenRels = cloneElement(leftRels, { children: [...leftRels.children, ...newRelationships] });
-  return { root: rewrittenRoot, relationshipsXml: writeXmlPart(rewrittenRels) };
+  return { root: rewrittenRoot, relationshipsXml: writeRelationshipsPart(rewrittenRels) };
 }
 
 function importRightRelatedParts(
@@ -905,7 +911,7 @@ function importRightRelatedParts(
   if (rewrites.size === 0) return root;
 
   rewritten = rewriteRelationshipIdsTopDown(root, rewrites, false);
-  outParts.set(relsPartName(destPartName), strToU8(writeXmlPart(leftRelsRoot)));
+  outParts.set(relsPartName(destPartName), strToU8(writeRelationshipsPart(leftRelsRoot)));
   return rewritten;
 }
 
@@ -932,8 +938,31 @@ function renderNoteScopes(
   rightParts: Record<string, Uint8Array>,
 ): void {
   if (!script.noteOps || script.noteOps.length === 0) return;
+  ensureNotePart(outParts, rightParts, 'word/footnotes.xml', W.footnote, W_FOOTNOTES);
+  ensureNotePart(outParts, rightParts, 'word/endnotes.xml', W.endnote, W_ENDNOTES);
   applyNoteDiffs(script.noteOps.filter((n) => n.kind === 'Footnote'), state, outParts, leftParts, rightParts, 'word/footnotes.xml', W.footnote, W_FOOTNOTES);
   applyNoteDiffs(script.noteOps.filter((n) => n.kind === 'Endnote'), state, outParts, leftParts, rightParts, 'word/endnotes.xml', W.endnote, W_ENDNOTES);
+}
+
+function ensureNotePart(
+  outParts: Map<string, Uint8Array>,
+  rightParts: Record<string, Uint8Array>,
+  partName: string,
+  noteName: XName,
+  rootName: XName,
+): void {
+  if (outParts.has(partName)) return;
+  const rightRoot = rightParts[partName] ? parseXml(strFromU8(rightParts[partName]!)) : null;
+  if (!rightRoot) return;
+  ensureMainRelationship(outParts, partName, noteName);
+  addContentTypeOverride(outParts, partName, nameEquals(noteName, W.footnote) ? CT_FOOTNOTES : CT_ENDNOTES);
+  const root = element(rootName, [...rightRoot.attributeInfos()]);
+  for (const n of rightRoot.elements(noteName)) {
+    const id = n.attribute(W.id);
+    if (id !== null && Number.isFinite(Number(id)) && Number(id) <= 0) root.children.push(cloneElement(n));
+  }
+  for (const child of root.children) if (child instanceof XElement) child.parent = root;
+  outParts.set(partName, strToU8(writeMainXmlPart(linqOutputShape(root))));
 }
 
 function applyNoteDiffs(
@@ -976,7 +1005,7 @@ function applyNoteDiffs(
     if (diff.leftNoteId !== null && diff.noteId !== diff.leftNoteId) noteEl = replaceElementAttributes(noteEl, W.id, diff.noteId);
     changed = true;
   }
-  if (changed) outParts.set(partName, strToU8(writeXmlPart(linqOutputShape(stripUnids(root)))));
+  if (changed) outParts.set(partName, strToU8(writeMainXmlPart(linqOutputShape(stripUnids(root)))));
 }
 
 function renumberNoteIds(
@@ -1025,7 +1054,7 @@ function renumberNoteIds(
       const defOldId = def.attribute(W.id);
       const rewritten = replaceElementAttributes(def, W.id, newId);
       replaceElementInParent(def, rewritten);
-      assigned.set(rewritten, newId);
+      assigned.set(def, newId);
       if (defOldId && defOldId !== newId) remap.set(defOldId, newId);
       ordered.push(rewritten);
     }
@@ -1033,7 +1062,7 @@ function renumberNoteIds(
   for (const n of real) if (![...assigned.keys()].includes(n) && !ordered.includes(n)) ordered.push(n);
   noteRoot.children.splice(0, noteRoot.children.length, ...reserved, ...ordered);
   for (const child of noteRoot.children) if (child instanceof XElement) child.parent = noteRoot;
-  outParts.set(partName, strToU8(writeXmlPart(linqOutputShape(noteRoot))));
+  outParts.set(partName, strToU8(writeMainXmlPart(linqOutputShape(noteRoot))));
   return remap;
 }
 
@@ -1050,7 +1079,7 @@ function remapNestedNoteReferences(outParts: Map<string, Uint8Array>, footnoteRe
       const mapped = id ? remap.get(id) : undefined;
       return mapped ? replaceElementAttributes(node, W.id, mapped) : null;
     });
-    outParts.set(partName, strToU8(writeXmlPart(linqOutputShape(rewritten))));
+    outParts.set(partName, strToU8(writeMainXmlPart(linqOutputShape(rewritten))));
   }
 }
 
@@ -1091,16 +1120,12 @@ function importRelationshipTarget(
   const contentType = contentTypeForPart(rightParts, sourcePart);
   const importedPart = freshImportedPartName(outParts, sourcePart);
   outParts.set(importedPart, bytes);
-  if (contentType) addContentTypeOverride(outParts, importedPart, contentType);
+  if (contentType) addContentTypeForImportedPart(outParts, importedPart, contentType);
 
   const newId = freshImportedRelationshipId(used);
   used.add(newId);
   const relativeTarget = relativeTargetFromPart(destPartName, importedPart);
-  const newRelationship = element(REL.Relationship, [
-    attr(REL_ID, newId),
-    attr(REL_TYPE, type),
-    attr(REL_TARGET, relativeTarget),
-  ]);
+  const newRelationship = packageRelationship(type, relativeTarget, newId);
   destRelsRoot.children.push(newRelationship);
   newRelationship.parent = destRelsRoot;
 
@@ -1115,7 +1140,68 @@ function importRelationshipTarget(
 function ensureRelationshipsRoot(parts: Map<string, Uint8Array>, name: string): XElement {
   const existing = parts.get(name);
   if (existing) return parseXml(strFromU8(existing));
-  return element(REL.Relationships);
+  return relationshipRootElement();
+}
+
+function ensureMainRelationship(parts: Map<string, Uint8Array>, partName: string, noteName: XName): void {
+  const relsName = relsPartName('word/document.xml');
+  const root = ensureRelationshipsRoot(parts, relsName);
+  const target = `/${partName}`;
+  const type = `${WORD_REL_PREFIX}${nameEquals(noteName, W.footnote) ? 'footnotes' : 'endnotes'}`;
+  for (const rel of childrenElements(root, REL.Relationship)) {
+    if (rel.attribute(REL_TYPE) === type && rel.attribute(REL_TARGET) === target) return;
+  }
+  const used = new Set(relationshipsById(root).keys());
+  const id = freshImportedRelationshipId(used);
+  const rel = packageRelationship(type, target, id);
+  root.children.push(rel);
+  rel.parent = root;
+  parts.set(relsName, strToU8(writeRelationshipsPart(root)));
+}
+
+function relationshipRootElement(): XElement {
+  return element(REL.Relationships, [attr(xname(XMLNS_NS, 'xmlns'), REL_NS)]);
+}
+
+function contentTypesRootElement(): XElement {
+  return element(CT_TYPES, [attr(xname(XMLNS_NS, 'xmlns'), CT_NS)]);
+}
+
+function packageRelationship(type: string, target: string, id: string, targetMode: string | null = null): XElement {
+  return cloneElement(element(REL.Relationship, [
+    attr(REL_TYPE, type),
+    attr(REL_TARGET, target),
+    ...(targetMode ? [attr(REL_TARGET_MODE, targetMode)] : []),
+    attr(REL_ID, id),
+  ]), { emptyElementSpace: true });
+}
+
+function writeMainXmlPart(root: XElement): string {
+  return writeXmlPart(cloneElement(root, { documentProlog: '<?xml version="1.0" encoding="utf-8" standalone="yes"?>\n' }));
+}
+
+function writeRelationshipsPart(root: XElement): string {
+  return writeXmlPart(relationshipOutputShape(root));
+}
+
+function writeContentTypesPart(root: XElement): string {
+  return writeXmlPart(cloneElement(linqOutputShape(root), { documentProlog: '<?xml version="1.0" encoding="utf-8"?>' }));
+}
+
+function relationshipOutputShape(root: XElement): XElement {
+  const children = root.children.map((child) => {
+    if (!(child instanceof XElement) || !nameEquals(child.name, REL.Relationship)) return child;
+    const type = child.attribute(REL_TYPE);
+    const target = child.attribute(REL_TARGET);
+    const targetMode = child.attribute(REL_TARGET_MODE);
+    const id = child.attribute(REL_ID);
+    if (!type || !target || !id) return cloneElement(child, { emptyElementSpace: true });
+    return packageRelationship(type, target, id, targetMode);
+  });
+  return cloneElement(root, {
+    children,
+    documentProlog: '<?xml version="1.0" encoding="utf-8"?>',
+  });
 }
 
 function relationshipRootForPart(parts: Record<string, Uint8Array>, partName: string): XElement | null {
@@ -1211,11 +1297,22 @@ function contentTypeForPart(parts: Record<string, Uint8Array>, partName: string)
   for (const over of root.elements(CT_OVERRIDE)) {
     if (over.attribute(CT_PART_NAME) === partPath) return over.attribute(CT_CONTENT_TYPE);
   }
+  const ext = extensionOf(partName);
+  if (ext) {
+    for (const def of root.elements(CT_DEFAULT)) {
+      if ((def.attribute(CT_EXTENSION) ?? '').toLowerCase() === ext.toLowerCase()) return def.attribute(CT_CONTENT_TYPE);
+    }
+  }
   return null;
 }
 
+function addContentTypeForImportedPart(parts: Map<string, Uint8Array>, partName: string, contentType: string): void {
+  if (partName.toLowerCase().endsWith('.xml')) addContentTypeOverride(parts, partName, contentType);
+  else addContentTypeDefault(parts, extensionOf(partName), contentType);
+}
+
 function addContentTypeOverride(parts: Map<string, Uint8Array>, partName: string, contentType: string): void {
-  const root = parts.get(CONTENT_TYPES) ? parseXml(strFromU8(parts.get(CONTENT_TYPES)!)) : element(CT_TYPES);
+  const root = parts.get(CONTENT_TYPES) ? parseXml(strFromU8(parts.get(CONTENT_TYPES)!)) : contentTypesRootElement();
   const partPath = `/${partName}`;
   for (const over of root.elements(CT_OVERRIDE)) {
     if (over.attribute(CT_PART_NAME) === partPath) return;
@@ -1223,7 +1320,25 @@ function addContentTypeOverride(parts: Map<string, Uint8Array>, partName: string
   const over = element(CT_OVERRIDE, [attr(CT_PART_NAME, partPath), attr(CT_CONTENT_TYPE, contentType)]);
   root.children.push(over);
   over.parent = root;
-  parts.set(CONTENT_TYPES, strToU8(writeXmlPart(root)));
+  parts.set(CONTENT_TYPES, strToU8(writeContentTypesPart(root)));
+}
+
+function addContentTypeDefault(parts: Map<string, Uint8Array>, extension: string | null, contentType: string): void {
+  if (!extension) return;
+  const root = parts.get(CONTENT_TYPES) ? parseXml(strFromU8(parts.get(CONTENT_TYPES)!)) : contentTypesRootElement();
+  for (const def of root.elements(CT_DEFAULT)) {
+    if ((def.attribute(CT_EXTENSION) ?? '').toLowerCase() === extension.toLowerCase()) return;
+  }
+  const def = element(CT_DEFAULT, [attr(CT_EXTENSION, extension), attr(CT_CONTENT_TYPE, contentType)]);
+  root.children.push(def);
+  def.parent = root;
+  parts.set(CONTENT_TYPES, strToU8(writeContentTypesPart(root)));
+}
+
+function extensionOf(partName: string): string | null {
+  const file = partName.slice(partName.lastIndexOf('/') + 1);
+  const dot = file.lastIndexOf('.');
+  return dot >= 0 && dot + 1 < file.length ? file.slice(dot + 1) : null;
 }
 
 function relationshipRoot(parts: Record<string, Uint8Array>): XElement | null {
