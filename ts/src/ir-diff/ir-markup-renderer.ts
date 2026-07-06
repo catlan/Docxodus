@@ -113,6 +113,12 @@ export function renderIrMarkup(
 
   result.set('word/document.xml', strToU8(writeXmlPart(newRoot)));
   if (remapped.relationshipsXml) result.set('word/_rels/document.xml.rels', strToU8(remapped.relationshipsXml));
+
+  // Carry right-only styles + numbering into the left-based package (the C# render's closing
+  // CopyMissingStylesFromOneDocToAnother / CopyMissingNumberingFromOneDocToAnother step) — a
+  // right-sourced paragraph naming a right-only style or list must keep its definition.
+  copyMissingStyles(result, rightParts);
+  copyMissingNumbering(result, rightParts);
   return result;
 }
 
@@ -1480,6 +1486,153 @@ function hasAncestor(el: XElement, name: XName): boolean {
 
 function replaceElementAttributes(el: XElement, name: XName, value: string): XElement {
   return withAttribute(el, name, value);
+}
+
+// ----------------------------------------------------------------- styles/numbering carry
+
+const W_STYLE = xname(W_NS, 'style');
+const W_TYPE_ATTR = xname(W_NS, 'type');
+const W_DEFAULT_ATTR = xname(W_NS, 'default');
+const W_NUMBERING = xname(W_NS, 'numbering');
+const W_ABSTRACT_NUM = xname(W_NS, 'abstractNum');
+const W_ABSTRACT_NUM_ID = xname(W_NS, 'abstractNumId');
+const W_NUM = xname(W_NS, 'num');
+const W_NSID = xname(W_NS, 'nsid');
+const W_TMPL = xname(W_NS, 'tmpl');
+
+/** C# WmlComparer.CopyMissingStylesFromOneDocToAnother: append RIGHT-only styles (matched by
+ * type + styleId, w:default stripped from the clone) to the output styles part. The part is
+ * re-saved even when nothing copies — the oracle round-trips it unconditionally. */
+function copyMissingStyles(outParts: Map<string, Uint8Array>, rightParts: Record<string, Uint8Array>): void {
+  const stylesName = 'word/styles.xml';
+  const toBytes = outParts.get(stylesName);
+  const fromBytes = rightParts[stylesName];
+  if (!toBytes || !fromBytes) return;
+  const toRoot = parseXml(strFromU8(toBytes));
+  const fromRoot = parseXml(strFromU8(fromBytes));
+  for (const style of fromRoot.elements(W_STYLE)) {
+    const type = style.attribute(W_TYPE_ATTR);
+    const styleId = style.attribute(W.styleId);
+    const existing = [...toRoot.elements(W_STYLE)].find(
+      (st) => st.attribute(W_TYPE_ATTR) === type && st.attribute(W.styleId) === styleId,
+    );
+    if (existing) continue;
+    const cloned = cloneElement(style, {
+      attributes: [...style.attributeInfos()].filter((a) => !nameEquals(a.name, W_DEFAULT_ATTR)),
+    });
+    toRoot.children.push(cloned);
+    cloned.parent = toRoot;
+  }
+  outParts.set(stylesName, strToU8(writeNoteXmlPart(linqOutputShape(toRoot))));
+}
+
+/** C# WmlComparer.CopyMissingNumberingFromOneDocToAnother (the #1634 legal-numbering fix):
+ * import RIGHT numbering definitions into the output, reusing a content-equal w:abstractNum
+ * (ids remapped), assigning fresh ids on conflicts, and creating + wiring the numbering part
+ * when the output has none. */
+function copyMissingNumbering(outParts: Map<string, Uint8Array>, rightParts: Record<string, Uint8Array>): void {
+  const numberingName = 'word/numbering.xml';
+  const fromBytes = rightParts[numberingName];
+  if (!fromBytes) return;
+  const toBytes = outParts.get(numberingName);
+  let toRoot: XElement;
+  if (toBytes) {
+    toRoot = parseXml(strFromU8(toBytes));
+  } else {
+    toRoot = element(W_NUMBERING, [
+      { name: xname(XMLNS_NS, 'w'), value: W_NS, prefix: 'xmlns', rawName: 'xmlns:w' },
+      { name: xname(XMLNS_NS, 'r'), value: R_NS, prefix: 'xmlns', rawName: 'xmlns:r' },
+    ]);
+    addContentTypeOverride(outParts, numberingName,
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml');
+    ensureDocumentRelationship(outParts, numberingName, 'numbering');
+  }
+  const fromRoot = parseXml(strFromU8(fromBytes));
+
+  let maxAbstractNumId = Math.max(0, ...[...toRoot.elements(W_ABSTRACT_NUM)].map((e) => intAttribute(e, W_ABSTRACT_NUM_ID) ?? 0));
+  let maxNumId = Math.max(0, ...[...toRoot.elements(W_NUM)].map((e) => intAttribute(e, W.numId) ?? 0));
+  const abstractNumIdMap = new Map<number, number>();
+
+  for (const abstractNum of fromRoot.elements(W_ABSTRACT_NUM)) {
+    const fromId = intAttribute(abstractNum, W_ABSTRACT_NUM_ID);
+    if (fromId === null) continue;
+    const normalizedFrom = canonicalXml(normalizeAbstractNumForComparison(abstractNum));
+    const matchingByContent = [...toRoot.elements(W_ABSTRACT_NUM)].find(
+      (e) => canonicalXml(normalizeAbstractNumForComparison(e)) === normalizedFrom,
+    );
+    if (matchingByContent) {
+      const existingId = intAttribute(matchingByContent, W_ABSTRACT_NUM_ID);
+      if (existingId !== null) {
+        abstractNumIdMap.set(fromId, existingId);
+        continue;
+      }
+    }
+    const idTaken = [...toRoot.elements(W_ABSTRACT_NUM)].some((e) => intAttribute(e, W_ABSTRACT_NUM_ID) === fromId);
+    const targetId = idTaken ? ++maxAbstractNumId : fromId;
+    abstractNumIdMap.set(fromId, targetId);
+    addNumberingChildInSchemaOrder(toRoot, withAttribute(cloneElement(abstractNum), W_ABSTRACT_NUM_ID, targetId));
+  }
+
+  for (const num of fromRoot.elements(W_NUM)) {
+    const fromNumId = intAttribute(num, W.numId);
+    const refEl = num.element(W_ABSTRACT_NUM_ID);
+    const fromRef = refEl ? intAttribute(refEl, W.val) : null;
+    if (fromNumId === null || fromRef === null) continue;
+    const mappedRef = abstractNumIdMap.get(fromRef) ?? fromRef;
+    const existingNum = [...toRoot.elements(W_NUM)].find((e) => intAttribute(e, W.numId) === fromNumId);
+    if (existingNum) {
+      const existingRefEl = existingNum.element(W_ABSTRACT_NUM_ID);
+      const existingRef = existingRefEl ? intAttribute(existingRefEl, W.val) : null;
+      if (existingRef === mappedRef) continue;
+      addNumberingChildInSchemaOrder(toRoot, numWithIds(num, ++maxNumId, mappedRef));
+    } else {
+      addNumberingChildInSchemaOrder(toRoot, mappedRef !== fromRef ? numWithIds(num, fromNumId, mappedRef) : cloneElement(num));
+    }
+  }
+
+  outParts.set(numberingName, strToU8(writeNoteXmlPart(linqOutputShape(toRoot))));
+}
+
+function numWithIds(num: XElement, numId: number, abstractRef: number): XElement {
+  const renumbered = withAttribute(num, W.numId, numId);
+  return cloneElement(renumbered, {
+    children: renumbered.children.map((c) =>
+      c instanceof XElement && nameEquals(c.name, W_ABSTRACT_NUM_ID) ? withAttribute(c, W.val, abstractRef) : c),
+  });
+}
+
+/** w:numbering schema order: numPicBullet* abstractNum* num* numIdMacAtCleanup? — insert before
+ * the first higher-ranked existing child (C# AddNumberingChildInSchemaOrder). */
+function addNumberingChildInSchemaOrder(numbering: XElement, child: XElement): void {
+  const rank = (e: XElement): number =>
+    e.name.local === 'numPicBullet' ? 0 : e.name.local === 'abstractNum' ? 1 : e.name.local === 'num' ? 2 : 3;
+  const childRank = rank(child);
+  const idx = numbering.children.findIndex((c) => c instanceof XElement && rank(c) > childRank);
+  numbering.children.splice(idx >= 0 ? idx : numbering.children.length, 0, child);
+  child.parent = numbering;
+}
+
+/** C# NormalizeAbstractNumForComparison: drop the id attribute + auto-generated nsid/tmpl. */
+function normalizeAbstractNumForComparison(abstractNum: XElement): XElement {
+  return cloneElement(abstractNum, {
+    attributes: [...abstractNum.attributeInfos()].filter((a) => !nameEquals(a.name, W_ABSTRACT_NUM_ID)),
+    children: abstractNum.children.filter(
+      (c) => !(c instanceof XElement && (nameEquals(c.name, W_NSID) || nameEquals(c.name, W_TMPL)))),
+  });
+}
+
+/** XNode.DeepEquals shape: names + attributes (ORDER-INSENSITIVE) + children (order-sensitive). */
+function canonicalXml(el: XElement): string {
+  const attrs = [...el.attributeInfos()].map((a) => `${a.name.ns} ${a.name.local}=${a.value}`).sort().join('');
+  const children = el.children.map((c) => (typeof c === 'string' ? `t${c}` : canonicalXml(c))).join('');
+  return `<${el.name.ns} ${el.name.local}|${attrs}|${children}>`;
+}
+
+function intAttribute(el: XElement, name: XName): number | null {
+  const raw = el.attribute(name);
+  if (raw === null) return null;
+  const n = Number.parseInt(raw, 10);
+  return Number.isNaN(n) ? null : n;
 }
 
 function xdocumentDeclaration(root: XElement): string {

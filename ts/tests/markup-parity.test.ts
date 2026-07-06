@@ -121,6 +121,8 @@ function isMarkupRendererOwnedPart(name: string): boolean {
     name === 'word/footnotes.xml' ||
     name === 'word/endnotes.xml' ||
     name === 'word/settings.xml' ||
+    name === 'word/styles.xml' ||
+    name === 'word/numbering.xml' ||
     /^word\/(?:header|footer)\d+\.xml$/i.test(name) ||
     /^word\/_rels\/(?:header|footer)\d+\.xml\.rels$/i.test(name) ||
     /^word\/(?:footnotes|endnotes)\.xml$/i.test(name) ||
