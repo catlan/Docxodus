@@ -23,12 +23,12 @@ beforeAll(async () => {
   await initialize();
 });
 
-describe('native markup renderer word/document.xml byte parity with C# oracle', () => {
+describe('native markup renderer full-part parity with C# oracle', () => {
   for (const fixture of SELF_FIXTURES) {
     const divergent = KNOWN_DIVERGENT.has(`self ${fixture}`);
     test(`self ${fixture}${divergent ? ' [known divergent]' : ''}`, async () => {
       const bytes = new Uint8Array(readFileSync(join(TEST_FILES, fixture)));
-      await expectDocumentXmlParity(bytes, bytes, divergent);
+      await expectPartMapParity(bytes, bytes, divergent);
     });
   }
 
@@ -42,7 +42,7 @@ describe('native markup renderer word/document.xml byte parity with C# oracle', 
       async () => {
         const leftBytes = new Uint8Array(readFileSync(join(wcDir, leftName)));
         const rightBytes = new Uint8Array(readFileSync(join(wcDir, rightName)));
-        await expectDocumentXmlParity(leftBytes, rightBytes, divergent);
+        await expectPartMapParity(leftBytes, rightBytes, divergent);
       },
     );
   }
@@ -58,9 +58,6 @@ function markupSkipReason(leftName: string, rightName: string): string | null {
   ) {
     return 'stage-A reader requires revision-free body XML';
   }
-  if (/Header|Footer/i.test(pair)) return 'M2 header/footer story part rebuild and sectPr relationship mutation deferred';
-  if (/Footnote|Endnote|Foot|End/i.test(pair)) return 'M2 footnote/endnote part rebuild and note-id renumbering deferred';
-  if (/Image|Picture|Media|Drawing/i.test(pair)) return 'M2 cross-part media and relationship import deferred';
   if (/-Ins(?:\.|-)/i.test(pair)) return 'stage-A reader requires revision-free body XML';
   return null;
 }
@@ -73,13 +70,35 @@ const KNOWN_DIVERGENT = new Set<string>([
   'WC-BodyBookmarks-Before.docx -> WC-BodyBookmarks-After.docx',
   'WC014-SmartArt-Before.docx -> WC014-SmartArt-After.docx',
   'WC052-SmartArt-Same.docx -> WC052-SmartArt-Same-Mod.docx',
-  'WC055-French.docx -> WC055-French-Mod.docx',
-  'WC056-French.docx -> WC056-French-Mod.docx',
   'self WC/WC-BodyBookmarks-Before.docx',
+  'WC004-Large.docx -> WC004-Large-Mod.docx',
+  'WC013-Image-Before.docx -> WC013-Image-After.docx',
+  'WC013-Image-Before2.docx -> WC013-Image-After2.docx',
+  'WC014-SmartArt-With-Image-Before.docx -> WC014-SmartArt-With-Image-After.docx',
+  'WC019-Hyperlink-Before.docx -> WC019-Hyperlink-After-2.docx',
+  'WC020-FootNote-Before.docx -> WC020-FootNote-After-1.docx',
+  'WC020-FootNote-Before.docx -> WC020-FootNote-After-2.docx',
+  'WC022-Image-Math-Para-Before.docx -> WC022-Image-Math-Para-After.docx',
+  'WC023-Table-4-Row-Image-Before.docx -> WC023-Table-4-Row-Image-After-Delete-1-Row.docx',
+  'WC034-Endnotes-Before.docx -> WC034-Endnotes-After1.docx',
+  'WC034-Endnotes-Before.docx -> WC034-Endnotes-After2.docx',
+  'WC034-Endnotes-Before.docx -> WC034-Endnotes-After3.docx',
+  'WC034-Footnotes-Before.docx -> WC034-Footnotes-After1.docx',
+  'WC034-Footnotes-Before.docx -> WC034-Footnotes-After2.docx',
+  'WC034-Footnotes-Before.docx -> WC034-Footnotes-After3.docx',
+  'WC035-Endnote-Before.docx -> WC035-Endnote-After.docx',
+  'WC035-Footnote-Before.docx -> WC035-Footnote-After.docx',
+  'WC036-Endnote-With-Table-Before.docx -> WC036-Endnote-With-Table-After.docx',
+  'WC036-Footnote-With-Table-Before.docx -> WC036-Footnote-With-Table-After.docx',
+  'WC059-Footnote.docx -> WC059-Footnote-Mod.docx',
+  'WC060-Endnote.docx -> WC060-Endnote-Mod.docx',
+  'WC063-Footnote.docx -> WC063-Footnote-Mod.docx',
+  'WC064-Footnote.docx -> WC064-Footnote-Mod.docx',
+  'WC067-Textbox-Image.docx -> WC067-Textbox-Image-Mod.docx',
 ]);
 
 
-async function expectDocumentXmlParity(
+async function expectPartMapParity(
   leftBytes: Uint8Array,
   rightBytes: Uint8Array,
   expectDivergent = false,
@@ -88,17 +107,83 @@ async function expectDocumentXmlParity(
   const right = readIrDocument(rightBytes);
   const script = buildIrEditScript(left, right);
   const tsParts = renderIrMarkup(leftBytes, rightBytes, script);
-  const tsDocument = strFromU8(tsParts.get('word/document.xml')!);
   const oracle = await docxDiffCompare(leftBytes, rightBytes, {});
-  const oracleDocument = strFromU8(unzipSync(oracle)['word/document.xml']!);
+  const leftParts = new Map(Object.entries(unzipSync(leftBytes)));
+  const oracleParts = new Map(Object.entries(unzipSync(oracle)));
+  const rewritten = new Set([...oracleRewrittenPartNames(leftParts, oracleParts)].map(normalizeGeneratedPartName));
+  const tsSnapshot = normalizedPartSnapshot(tsParts, rewritten);
+  const oracleSnapshot = normalizedPartSnapshot(oracleParts, rewritten);
   if (expectDivergent) {
     // Ratchet: this pair is known divergent. When a renderer fix makes it
     // match, this assertion fails loudly — REMOVE the pair from
     // KNOWN_DIVERGENT to lock the win in.
-    expect(tsDocument, 'pair now matches — remove it from KNOWN_DIVERGENT').not.toBe(oracleDocument);
+    expect(tsSnapshot, 'pair now matches — remove it from KNOWN_DIVERGENT').not.toEqual(oracleSnapshot);
     return;
   }
-  expect(tsDocument).toBe(oracleDocument);
+  expect(tsSnapshot).toEqual(oracleSnapshot);
+}
+
+function normalizedPartSnapshot(parts: ReadonlyMap<string, Uint8Array>, names: ReadonlySet<string>): Record<string, string> {
+  const entries: Array<readonly [string, string]> = [];
+  for (const [name, bytes] of parts) {
+    if (name.endsWith('/')) continue;
+    if (name === '_rels/.rels') continue;
+    const normalizedName = normalizeGeneratedPartName(name);
+    if (!names.has(normalizedName)) continue;
+    const value = isXmlPart(name)
+      ? normalizeGeneratedIds(strFromU8(bytes))
+      : `base64:${Buffer.from(bytes).toString('base64')}`;
+    entries.push([normalizedName, value]);
+  }
+  entries.sort((a, b) => a[0].localeCompare(b[0]));
+  return Object.fromEntries(entries);
+}
+
+function oracleRewrittenPartNames(leftParts: ReadonlyMap<string, Uint8Array>, oracleParts: ReadonlyMap<string, Uint8Array>): Set<string> {
+  const names = new Set<string>();
+  for (const [name, oracleBytes] of oracleParts) {
+    if (name.endsWith('/') || name === '_rels/.rels') continue;
+    if (!isMarkupRendererOwnedPart(name)) continue;
+    const leftBytes = leftParts.get(name);
+    if (!leftBytes || !sameBytes(leftBytes, oracleBytes)) names.add(name);
+  }
+  for (const name of leftParts.keys()) if (!oracleParts.has(name)) names.add(name);
+  return names;
+}
+
+function isMarkupRendererOwnedPart(name: string): boolean {
+  return name === '[Content_Types].xml' ||
+    name === 'word/document.xml' ||
+    name === 'word/_rels/document.xml.rels' ||
+    name === 'word/footnotes.xml' ||
+    name === 'word/endnotes.xml' ||
+    name === 'word/settings.xml' ||
+    /^word\/(?:header|footer)\d+\.xml$/i.test(name) ||
+    /^word\/_rels\/(?:header|footer)\d+\.xml\.rels$/i.test(name) ||
+    /^word\/(?:footnotes|endnotes)\.xml$/i.test(name) ||
+    /^word\/(?:media|diagrams)\//i.test(name) ||
+    /^word\/(?:media|diagrams)\/_rels\//i.test(name);
+}
+
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+function isXmlPart(name: string): boolean {
+  return name.endsWith('.xml') || name.endsWith('.rels') || name === '[Content_Types].xml';
+}
+
+function normalizeGeneratedPartName(name: string): string {
+  return name.replace(/P[0-9a-f]{32}(?=\.)/gi, 'PGEN');
+}
+
+function normalizeGeneratedIds(xml: string): string {
+  const normalized = xml
+    .replace(/R[0-9a-f]{32}/gi, 'RGEN')
+    .replace(/P[0-9a-f]{32}(?=\.)/gi, 'PGEN');
+  return normalized;
 }
 
 function buildPairs(): Array<readonly [string, string]> {

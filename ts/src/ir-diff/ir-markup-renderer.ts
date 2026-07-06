@@ -1,11 +1,11 @@
 import { unzipSync, strFromU8, strToU8 } from 'fflate';
 import { anchorToString } from '../ir/ir-anchor.js';
-import { W, PT_NS, R } from '../ir/names.js';
+import { W, W_NS, PT_NS, R, R_NS, REL } from '../ir/names.js';
 import type { IrBlock, IrParagraph, IrTable } from '../ir/ir-blocks.js';
 import { readIrDocument, type IrDocument } from '../ir/ir-reader.js';
 import { tokenizeIrParagraph } from './ir-diff-tokenizer.js';
 import { normalizeIrDiffSettings, type IrDiffSettings, type IrDiffSettingsOptions } from './ir-diff-settings.js';
-import type { IrCellOp, IrEditOp, IrEditScript, IrRowOp, IrTableDiff } from './ir-edit-script.js';
+import type { IrCellOp, IrEditOp, IrEditScript, IrNoteDiff, IrRowOp, IrTableDiff } from './ir-edit-script.js';
 import type { IrDiffToken } from './ir-diff-token.js';
 import type { IrTokenDiff, IrTokenOp } from './ir-token-diff.js';
 import { writeXmlPart } from '../xml/xwriter.js';
@@ -22,6 +22,15 @@ const SOURCE_LINK_ID = xname(PT_NS, 'SourceLinkId');
 const REL_ID = xname('', 'Id');
 const REL_TYPE = xname('', 'Type');
 const REL_TARGET = xname('', 'Target');
+const REL_TARGET_MODE = xname('', 'TargetMode');
+const CONTENT_TYPES = '[Content_Types].xml';
+const CT_NS = 'http://schemas.openxmlformats.org/package/2006/content-types';
+const CT_TYPES = xname(CT_NS, 'Types');
+const CT_OVERRIDE = xname(CT_NS, 'Override');
+const CT_PART_NAME = xname('', 'PartName');
+const CT_CONTENT_TYPE = xname('', 'ContentType');
+const W_FOOTNOTES = xname(W_NS, 'footnotes');
+const W_ENDNOTES = xname(W_NS, 'endnotes');
 
 interface RenderState {
   readonly left: IrDocument;
@@ -30,6 +39,7 @@ interface RenderState {
   nextId: number;
   nextMoveName: number;
   readonly moveNames: Map<number, string>;
+  readonly rightSourcedClones: XElement[];
 }
 
 export function renderIrMarkup(
@@ -43,7 +53,7 @@ export function renderIrMarkup(
   const settings = normalizeIrDiffSettings(options);
   const left = readIrDocument(leftDocx, { retainSources: true });
   const right = readIrDocument(rightDocx, { retainSources: true });
-  const state: RenderState = { left, right, settings, nextId: 1, nextMoveName: 1, moveNames: new Map() };
+  const state: RenderState = { left, right, settings, nextId: 1, nextMoveName: 1, moveNames: new Map(), rightSourcedClones: [] };
   const bodyBlocks: XElement[] = [];
   for (const op of script.ops) renderBlockOp(op, state, bodyBlocks);
 
@@ -73,14 +83,20 @@ export function renderIrMarkup(
   }
 
   const newBody = cloneElement(body, { children: newBodyChildren });
-  const normalized = normalizeBookmarks(stripUnids(replaceChild(root, body, newBody)), bodyBookmarkNames(left), bodyBookmarkNames(right));
+  const result = new Map<string, Uint8Array>();
+  for (const [name, bytes] of Object.entries(leftParts)) result.set(name, bytes);
+
+  const imported = importRightRelatedParts(stripUnids(replaceChild(root, body, newBody)), result, leftParts, rightParts, 'word/document.xml');
+  renderNoteScopes(script, state, result, leftParts, rightParts);
+  const footnoteRemap = renumberNoteIds(imported, result, 'word/footnotes.xml', W.footnoteReference, W.footnote, W_FOOTNOTES);
+  const endnoteRemap = renumberNoteIds(imported, result, 'word/endnotes.xml', W.endnoteReference, W.endnote, W_ENDNOTES);
+  remapNestedNoteReferences(result, footnoteRemap, endnoteRemap);
+  const normalized = normalizeBookmarks(imported, bodyBookmarkNames(left), bodyBookmarkNames(right));
   const remapped = remapHyperlinkRelationshipCollisions(normalized, leftParts, rightParts);
   const newRoot = cloneElement(linqOutputShape(remapped.root), {
     documentProlog: '<?xml version="1.0" encoding="utf-8" standalone="yes"?>\n',
   });
 
-  const result = new Map<string, Uint8Array>();
-  for (const [name, bytes] of Object.entries(leftParts)) result.set(name, bytes);
   result.set('word/document.xml', strToU8(writeXmlPart(newRoot)));
   if (remapped.relationshipsXml) result.set('word/_rels/document.xml.rels', strToU8(remapped.relationshipsXml));
   return result;
@@ -90,7 +106,7 @@ function renderBlockOp(op: IrEditOp, state: RenderState, sink: XElement[]): void
   if (isSectionBreakOp(op, state)) return;
   switch (op.kind) {
     case 'EqualBlock':
-      emitVerbatim(op.rightAnchor, state.right, sink);
+      emitVerbatimRight(op.rightAnchor, state, sink);
       return;
     case 'FormatOnlyBlock':
       if (resolveBlock(op.rightAnchor, state.right)?.kind === 'table') emitFormatOnlyTable(op, state, sink);
@@ -139,10 +155,19 @@ function emitVerbatim(anchor: string | null, doc: IrDocument, sink: XElement[]):
   if (src) sink.push(stripUnids(cloneElement(src)));
 }
 
+function emitVerbatimRight(anchor: string | null, state: RenderState, sink: XElement[]): void {
+  const src = sourceElement(anchor, state.right);
+  if (!src) return;
+  const clone = stripUnids(cloneElement(src));
+  registerRightSourcedClone(clone, state);
+  sink.push(clone);
+}
+
 function emitWholeBlock(anchor: string | null, doc: IrDocument, state: RenderState, sink: XElement[], kind: RevKind): void {
   const src = sourceElement(anchor, doc);
   if (!src) return;
   const clone = stripUnids(cloneElement(src));
+  if (doc === state.right) registerRightSourcedClone(clone, state);
   if (nameEquals(clone.name, W.p)) {
     markWholeParagraph(clone, kind, state);
     sink.push(clone);
@@ -269,9 +294,19 @@ function buildTokenOpContent(
   for (const op of diff.ops) {
     switch (op.kind) {
       case 'Equal': {
-        const [s, e] = rightSpanChars(rightTokens, op);
-        const [zs, ze] = zeroWidthBoundaries(rightTokens, op.rightStart, op.rightEnd);
-        content.push(...rightRuns.slice(s, e, zs, ze));
+        const [rs, re] = rightSpanChars(rightTokens, op);
+        const [ls, le] = leftSpanChars(leftTokens, op);
+        const [rzs, rze] = zeroWidthBoundaries(rightTokens, op.rightStart, op.rightEnd);
+        const [lzs, lze] = zeroWidthBoundaries(leftTokens, op.leftStart, op.leftEnd);
+        if (rawSpanText(leftTokens, op.leftStart, op.leftEnd) !== rawSpanText(rightTokens, op.rightStart, op.rightEnd)) {
+          for (const r of leftRuns.slice(ls, le, lzs, lze)) content.push(...wrapFieldAware(r, 'Del', state));
+          for (const r of rightRuns.slice(rs, re, rzs, rze)) content.push(...wrapFieldAware(r, 'Ins', state));
+        } else {
+          for (const r of rightRuns.slice(rs, re, rzs, rze)) {
+            registerRightSourcedClone(r, state);
+            content.push(r);
+          }
+        }
         break;
       }
       case 'FormatChanged': {
@@ -280,6 +315,7 @@ function buildTokenOpContent(
         for (const r of rightRuns.slice(rs, re, zs, ze)) {
           const leftRPr = leftRuns.rPrAtChar(leftSpanChars(leftTokens, op)[0]);
           for (const run of runsForFormatStamp(r)) applyRPrChange(run, leftRPr, state);
+          registerRightSourcedClone(r, state);
           content.push(r);
         }
         break;
@@ -836,6 +872,360 @@ function remapHyperlinkRelationshipCollisions(
   return { root: rewrittenRoot, relationshipsXml: writeXmlPart(rewrittenRels) };
 }
 
+function importRightRelatedParts(
+  root: XElement,
+  outParts: Map<string, Uint8Array>,
+  leftParts: Record<string, Uint8Array>,
+  rightParts: Record<string, Uint8Array>,
+  destPartName: string,
+): XElement {
+  let rewritten = root;
+  const leftRelsRoot = ensureRelationshipsRoot(outParts, relsPartName(destPartName));
+  const rightRelsRoot = relationshipRootForPart(rightParts, destPartName);
+  if (!rightRelsRoot) return root;
+  const rightRels = relationshipsById(rightRelsRoot);
+  const leftRels = relationshipsById(leftRelsRoot);
+  const used = new Set(leftRels.keys());
+  const rewrites = new Map<string, string>();
+
+  for (const el of descendantsAndSelf(root)) {
+    if (isDeletedRevisionContext(el)) continue;
+    for (const a of el.attributeInfos()) {
+      if (!isRelationshipAttribute(a.name)) continue;
+      const oldId = a.value;
+      if (rewrites.has(oldId)) continue;
+      const rightRel = rightRels.get(oldId);
+      if (!rightRel || rightRel.attribute(REL_TARGET_MODE) === 'External') continue;
+      const leftRel = leftRels.get(oldId);
+      if (leftRel && sameRelationship(leftRel, rightRel) && sameRelationshipTargetBytes(leftParts, rightParts, destPartName, leftRel, rightRel)) continue;
+      const imported = importRelationshipTarget(outParts, rightParts, destPartName, rightRel, leftRelsRoot, used);
+      if (imported) rewrites.set(oldId, imported);
+    }
+  }
+  if (rewrites.size === 0) return root;
+
+  rewritten = rewriteRelationshipIdsTopDown(root, rewrites, false);
+  outParts.set(relsPartName(destPartName), strToU8(writeXmlPart(leftRelsRoot)));
+  return rewritten;
+}
+
+function rewriteRelationshipIdsTopDown(node: XElement, rewrites: ReadonlyMap<string, string>, inDeleted: boolean): XElement {
+  const deletedHere = nameEquals(node.name, W.del) || nameEquals(node.name, W.moveFrom);
+  const insertedHere = nameEquals(node.name, W.ins) || nameEquals(node.name, W.moveTo);
+  const childDeleted = insertedHere ? false : inDeleted || deletedHere;
+  let changed = false;
+  const attrs = [...node.attributeInfos()].map((a) => {
+    const next = !childDeleted && isRelationshipAttribute(a.name) ? rewrites.get(a.value) : undefined;
+    if (!next) return a;
+    changed = true;
+    return { ...a, value: next };
+  });
+  const children = node.children.map((c) => c instanceof XElement ? rewriteRelationshipIdsTopDown(c, rewrites, childDeleted) : c);
+  return changed || children.some((c, i) => c !== node.children[i]) ? cloneElement(node, { attributes: attrs, children }) : node;
+}
+
+function renderNoteScopes(
+  script: IrEditScript,
+  state: RenderState,
+  outParts: Map<string, Uint8Array>,
+  leftParts: Record<string, Uint8Array>,
+  rightParts: Record<string, Uint8Array>,
+): void {
+  if (!script.noteOps || script.noteOps.length === 0) return;
+  applyNoteDiffs(script.noteOps.filter((n) => n.kind === 'Footnote'), state, outParts, leftParts, rightParts, 'word/footnotes.xml', W.footnote, W_FOOTNOTES);
+  applyNoteDiffs(script.noteOps.filter((n) => n.kind === 'Endnote'), state, outParts, leftParts, rightParts, 'word/endnotes.xml', W.endnote, W_ENDNOTES);
+}
+
+function applyNoteDiffs(
+  diffs: ReadonlyArray<IrNoteDiff>,
+  state: RenderState,
+  outParts: Map<string, Uint8Array>,
+  leftParts: Record<string, Uint8Array>,
+  rightParts: Record<string, Uint8Array>,
+  partName: string,
+  noteName: XName,
+  rootName: XName,
+): void {
+  if (diffs.length === 0) return;
+  const rightRoot = rightParts[partName] ? parseXml(strFromU8(rightParts[partName]!)) : null;
+  let root = outParts.get(partName) ? parseXml(strFromU8(outParts.get(partName)!)) : null;
+  if (!root) {
+    if (!rightRoot) return;
+    root = element(rootName, [...rightRoot.attributeInfos()]);
+    for (const n of rightRoot.elements(noteName)) {
+      const id = n.attribute(W.id);
+      if (id !== null && Number.isFinite(Number(id)) && Number(id) <= 0) root.children.push(cloneElement(n));
+    }
+    for (const child of root.children) if (child instanceof XElement) child.parent = root;
+  }
+
+  let changed = false;
+  for (const diff of diffs) {
+    let noteEl = diff.leftNoteId ? childrenElements(root, noteName).find((e) => e.attribute(W.id) === diff.leftNoteId) ?? null : null;
+    if (!noteEl) {
+      const rightNote = rightRoot ? childrenElements(rightRoot, noteName).find((e) => e.attribute(W.id) === diff.noteId) ?? null : null;
+      if (!rightNote) continue;
+      noteEl = element(noteName, [...rightNote.attributeInfos()], childrenElements(rightNote).filter((e) => !nameEquals(e.name, W.p) && !nameEquals(e.name, W.tbl)).map((e) => stripUnids(cloneElement(e))));
+      root.children.push(noteEl);
+      noteEl.parent = root;
+    }
+    const blocks: XElement[] = [];
+    for (const op of diff.ops) renderBlockOp(op, state, blocks);
+    noteEl.children.splice(0, noteEl.children.length, ...noteEl.children.filter((c) => !(c instanceof XElement && (nameEquals(c.name, W.p) || nameEquals(c.name, W.tbl)))), ...blocks.map((b) => stripUnids(b)));
+    for (const child of noteEl.children) if (child instanceof XElement) child.parent = noteEl;
+    if (diff.leftNoteId !== null && diff.noteId !== diff.leftNoteId) noteEl = replaceElementAttributes(noteEl, W.id, diff.noteId);
+    changed = true;
+  }
+  if (changed) outParts.set(partName, strToU8(writeXmlPart(linqOutputShape(stripUnids(root)))));
+}
+
+function renumberNoteIds(
+  documentRoot: XElement,
+  outParts: Map<string, Uint8Array>,
+  partName: string,
+  refName: XName,
+  noteName: XName,
+  rootName: XName,
+): Map<string, string> {
+  const bytes = outParts.get(partName);
+  if (!bytes) return new Map();
+  const noteRoot = parseXml(strFromU8(bytes));
+  const body = documentRoot.element(W.body);
+  if (!body) return new Map();
+  const refs = [...body.descendants(refName)];
+  if (refs.length === 0) return new Map();
+
+  const notes = childrenElements(noteRoot, noteName);
+  const reserved = notes.filter(isReservedNote);
+  const real = notes.filter((n) => !isReservedNote(n));
+  const delDefs = real.filter(isDeletedOnlyNote);
+  const liveById = new Map<string, XElement>();
+  for (const n of real.filter((x) => !isDeletedOnlyNote(x))) {
+    const id = n.attribute(W.id);
+    if (id) liveById.set(id, n);
+  }
+  let delIndex = 0;
+  let next = Math.max(0, ...reserved.map((n) => Number(n.attribute(W.id) ?? 0)).filter((n) => n > 0)) + 1;
+  const assigned = new Map<XElement, string>();
+  const remap = new Map<string, string>();
+  const ordered: XElement[] = [];
+  for (const ref of refs) {
+    const oldId = ref.attribute(W.id);
+    if (!oldId) continue;
+    const isDel = hasAncestor(ref, W.del);
+    const def = isDel ? (delDefs[delIndex++] ?? liveById.get(oldId) ?? null) : (liveById.get(oldId) ?? null);
+    const existing = def ? assigned.get(def) : undefined;
+    if (existing) {
+      replaceElementInParent(ref, replaceElementAttributes(ref, W.id, existing));
+      continue;
+    }
+    const newId = String(next++);
+    replaceElementInParent(ref, replaceElementAttributes(ref, W.id, newId));
+    if (def) {
+      const defOldId = def.attribute(W.id);
+      const rewritten = replaceElementAttributes(def, W.id, newId);
+      replaceElementInParent(def, rewritten);
+      assigned.set(rewritten, newId);
+      if (defOldId && defOldId !== newId) remap.set(defOldId, newId);
+      ordered.push(rewritten);
+    }
+  }
+  for (const n of real) if (![...assigned.keys()].includes(n) && !ordered.includes(n)) ordered.push(n);
+  noteRoot.children.splice(0, noteRoot.children.length, ...reserved, ...ordered);
+  for (const child of noteRoot.children) if (child instanceof XElement) child.parent = noteRoot;
+  outParts.set(partName, strToU8(writeXmlPart(linqOutputShape(noteRoot))));
+  return remap;
+}
+
+function remapNestedNoteReferences(outParts: Map<string, Uint8Array>, footnoteRemap: ReadonlyMap<string, string>, endnoteRemap: ReadonlyMap<string, string>): void {
+  if (footnoteRemap.size === 0 && endnoteRemap.size === 0) return;
+  for (const partName of ['word/footnotes.xml', 'word/endnotes.xml']) {
+    const bytes = outParts.get(partName);
+    if (!bytes) continue;
+    const root = parseXml(strFromU8(bytes));
+    const rewritten = transformDescendants(root, (node) => {
+      const remap = nameEquals(node.name, W.footnoteReference) ? footnoteRemap : nameEquals(node.name, W.endnoteReference) ? endnoteRemap : null;
+      if (!remap) return null;
+      const id = node.attribute(W.id);
+      const mapped = id ? remap.get(id) : undefined;
+      return mapped ? replaceElementAttributes(node, W.id, mapped) : null;
+    });
+    outParts.set(partName, strToU8(writeXmlPart(linqOutputShape(rewritten))));
+  }
+}
+
+function isReservedNote(note: XElement): boolean {
+  const id = Number(note.attribute(W.id) ?? Number.NaN);
+  return note.attribute(W.type) !== null || (Number.isFinite(id) && id <= 0);
+}
+
+function isDeletedOnlyNote(note: XElement): boolean {
+  const hasDelText = [...note.descendants(W.delText)].length > 0;
+  const hasLiveText = [...note.descendants(W.t)].some((t) => !hasAncestor(t, W.del));
+  return hasDelText && !hasLiveText;
+}
+
+function hasAncestor(el: XElement, name: XName): boolean {
+  for (let p = el.parent; p; p = p.parent) if (nameEquals(p.name, name)) return true;
+  return false;
+}
+
+function replaceElementAttributes(el: XElement, name: XName, value: string): XElement {
+  return withAttribute(el, name, value);
+}
+
+function importRelationshipTarget(
+  outParts: Map<string, Uint8Array>,
+  rightParts: Record<string, Uint8Array>,
+  destPartName: string,
+  rightRel: XElement,
+  destRelsRoot: XElement,
+  used: Set<string>,
+): string | null {
+  const target = rightRel.attribute(REL_TARGET);
+  const type = rightRel.attribute(REL_TYPE);
+  if (!target || !type) return null;
+  const sourcePart = resolveTargetPart(destPartName, target);
+  const bytes = rightParts[sourcePart];
+  if (!bytes) return null;
+  const contentType = contentTypeForPart(rightParts, sourcePart);
+  const importedPart = freshImportedPartName(outParts, sourcePart);
+  outParts.set(importedPart, bytes);
+  if (contentType) addContentTypeOverride(outParts, importedPart, contentType);
+
+  const newId = freshImportedRelationshipId(used);
+  used.add(newId);
+  const relativeTarget = relativeTargetFromPart(destPartName, importedPart);
+  const newRelationship = element(REL.Relationship, [
+    attr(REL_ID, newId),
+    attr(REL_TYPE, type),
+    attr(REL_TARGET, relativeTarget),
+  ]);
+  destRelsRoot.children.push(newRelationship);
+  newRelationship.parent = destRelsRoot;
+
+  if (importedPart.toLowerCase().endsWith('.xml')) {
+    const importedRoot = parseXml(strFromU8(bytes));
+    const fixedRoot = importRightRelatedParts(importedRoot, outParts, rightParts, rightParts, sourcePart);
+    outParts.set(importedPart, strToU8(writeXmlPart(fixedRoot)));
+  }
+  return newId;
+}
+
+function ensureRelationshipsRoot(parts: Map<string, Uint8Array>, name: string): XElement {
+  const existing = parts.get(name);
+  if (existing) return parseXml(strFromU8(existing));
+  return element(REL.Relationships);
+}
+
+function relationshipRootForPart(parts: Record<string, Uint8Array>, partName: string): XElement | null {
+  const bytes = parts[relsPartName(partName)];
+  return bytes ? parseXml(strFromU8(bytes)) : null;
+}
+
+function relsPartName(partName: string): string {
+  const slash = partName.lastIndexOf('/');
+  const dir = slash < 0 ? '' : partName.slice(0, slash + 1);
+  const file = slash < 0 ? partName : partName.slice(slash + 1);
+  return `${dir}_rels/${file}.rels`;
+}
+
+function sameRelationship(a: XElement, b: XElement): boolean {
+  return a.attribute(REL_TYPE) === b.attribute(REL_TYPE) &&
+    a.attribute(REL_TARGET) === b.attribute(REL_TARGET) &&
+    a.attribute(REL_TARGET_MODE) === b.attribute(REL_TARGET_MODE);
+}
+
+function sameRelationshipTargetBytes(
+  leftParts: Record<string, Uint8Array>,
+  rightParts: Record<string, Uint8Array>,
+  partName: string,
+  leftRel: XElement,
+  rightRel: XElement,
+): boolean {
+  const leftTarget = leftRel.attribute(REL_TARGET);
+  const rightTarget = rightRel.attribute(REL_TARGET);
+  if (!leftTarget || !rightTarget) return false;
+  const leftBytes = leftParts[resolveTargetPart(partName, leftTarget)];
+  const rightBytes = rightParts[resolveTargetPart(partName, rightTarget)];
+  if (!leftBytes || !rightBytes || leftBytes.length !== rightBytes.length) return false;
+  for (let i = 0; i < leftBytes.length; i++) if (leftBytes[i] !== rightBytes[i]) return false;
+  return true;
+}
+
+function isRelationshipAttribute(name: XName): boolean {
+  return name.ns === R_NS;
+}
+
+function isDeletedRevisionContext(el: XElement): boolean {
+  for (let p: XElement | null = el; p; p = p.parent) {
+    if (nameEquals(p.name, W.del) || nameEquals(p.name, W.moveFrom)) return true;
+    if (nameEquals(p.name, W.ins) || nameEquals(p.name, W.moveTo)) return false;
+  }
+  return false;
+}
+
+function freshImportedRelationshipId(used: ReadonlySet<string>): string {
+  let n = 1;
+  while (used.has(`R${n.toString(16).padStart(32, '0')}`)) n++;
+  return `R${n.toString(16).padStart(32, '0')}`;
+}
+
+function freshImportedPartName(parts: ReadonlyMap<string, Uint8Array>, sourcePart: string): string {
+  const slash = sourcePart.lastIndexOf('/');
+  const dir = slash < 0 ? '' : sourcePart.slice(0, slash + 1);
+  const file = slash < 0 ? sourcePart : sourcePart.slice(slash + 1);
+  const dot = file.lastIndexOf('.');
+  const ext = dot >= 0 ? file.slice(dot) : '';
+  let n = 1;
+  let candidate = `${dir}P${n.toString(16).padStart(32, '0')}${ext}`;
+  while (parts.has(candidate)) {
+    n++;
+    candidate = `${dir}P${n.toString(16).padStart(32, '0')}${ext}`;
+  }
+  return candidate;
+}
+
+function relativeTargetFromPart(fromPart: string, toPart: string): string {
+  const fromDir = fromPart.includes('/') ? fromPart.slice(0, fromPart.lastIndexOf('/') + 1) : '';
+  return toPart.startsWith(fromDir) ? toPart.slice(fromDir.length) : `/${toPart}`;
+}
+
+function resolveTargetPart(sourcePart: string, target: string): string {
+  if (target.startsWith('/')) return target.slice(1);
+  const slash = sourcePart.lastIndexOf('/');
+  const base = slash < 0 ? '' : sourcePart.slice(0, slash + 1);
+  const stack: string[] = [];
+  for (const segment of `${base}${target}`.split('/')) {
+    if (segment === '' || segment === '.') continue;
+    if (segment === '..') stack.pop();
+    else stack.push(segment);
+  }
+  return stack.join('/');
+}
+
+function contentTypeForPart(parts: Record<string, Uint8Array>, partName: string): string | null {
+  const root = parts[CONTENT_TYPES] ? parseXml(strFromU8(parts[CONTENT_TYPES]!)) : null;
+  if (!root) return null;
+  const partPath = `/${partName}`;
+  for (const over of root.elements(CT_OVERRIDE)) {
+    if (over.attribute(CT_PART_NAME) === partPath) return over.attribute(CT_CONTENT_TYPE);
+  }
+  return null;
+}
+
+function addContentTypeOverride(parts: Map<string, Uint8Array>, partName: string, contentType: string): void {
+  const root = parts.get(CONTENT_TYPES) ? parseXml(strFromU8(parts.get(CONTENT_TYPES)!)) : element(CT_TYPES);
+  const partPath = `/${partName}`;
+  for (const over of root.elements(CT_OVERRIDE)) {
+    if (over.attribute(CT_PART_NAME) === partPath) return;
+  }
+  const over = element(CT_OVERRIDE, [attr(CT_PART_NAME, partPath), attr(CT_CONTENT_TYPE, contentType)]);
+  root.children.push(over);
+  over.parent = root;
+  parts.set(CONTENT_TYPES, strToU8(writeXmlPart(root)));
+}
+
 function relationshipRoot(parts: Record<string, Uint8Array>): XElement | null {
   const bytes = parts['word/_rels/document.xml.rels'];
   return bytes ? parseXml(strFromU8(bytes)) : null;
@@ -1085,6 +1475,11 @@ function moveName(id: number, state: RenderState): string {
   if (!name) { name = `move${state.nextMoveName++}`; state.moveNames.set(id, name); }
   return name;
 }
+function registerRightSourcedClone(clone: XElement, state: RenderState): void {
+  if (descendantsAndSelf(clone).some((el) => [...el.attributeInfos()].some((a) => isRelationshipAttribute(a.name)))) {
+    state.rightSourcedClones.push(clone);
+  }
+}
 
 function resolveBlock(anchor: string | null, doc: IrDocument): IrBlock | undefined { return anchor ? doc.anchorIndex.get(anchor) : undefined; }
 function sourceElement(anchor: string | null, doc: IrDocument): XElement | null { return resolveBlock(anchor, doc)?.source.element ?? null; }
@@ -1111,6 +1506,7 @@ function leftSpanChars(tokens: ReadonlyArray<IrDiffToken>, op: IrTokenOp): [numb
   return [tokens[op.leftStart]!.startChar, tokens[op.leftEnd - 1]!.endChar];
 }
 function segmentSliceLength(diff: IrTokenDiff, leftSide: boolean): number { return diff.ops.reduce((n, o) => n + (leftSide ? (o.kind === 'Insert' ? 0 : o.leftEnd - o.leftStart) : (o.kind === 'Delete' ? 0 : o.rightEnd - o.rightStart)), 0); }
+function rawSpanText(tokens: ReadonlyArray<IrDiffToken>, start: number, end: number): string { return tokens.slice(start, end).map((t) => t.text).join(''); }
 function runsForFormatStamp(el: XElement): XElement[] { return nameEquals(el.name, W.r) ? [el] : [...el.descendants(W.r)]; }
 function runTextLength(run: XElement): number { return childrenElements(run, W.t).reduce((n, t) => n + t.value.length, 0); }
 function compareXml(el: XElement): string { return writeXmlPart(stripUnids(cloneElement(el)), { includeDeclaration: false }); }
