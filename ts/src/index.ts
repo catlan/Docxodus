@@ -15,3 +15,7 @@ export * from './ir/ir-inlines.js';
 export * from './ir/ir-blocks.js';
 export * from './ir-diff/ir-diff-token.js';
 export * from './ir-diff/ir-diff-tokenizer.js';
+export * from './ir/ir-content-hash-builder.js';
+export * from './ir/ir-canonicalize.js';
+export * from './ir/kind-for.js';
+export * from './ir/ir-reader.js';

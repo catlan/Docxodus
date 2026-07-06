@@ -32,3 +32,22 @@ export function irHashCompute(bytesOrString: string | Uint8Array): IrHash {
 }
 
 export const irHashEquals = (left: IrHash, right: IrHash): boolean => left === right;
+
+/** The 32 raw digest bytes (big-endian hex order, matching toHex). */
+export function irHashToBytes(hash: IrHash): Uint8Array {
+  const bytes = new Uint8Array(32);
+  for (let i = 0; i < 32; i++) {
+    bytes[i] = parseInt(hash.slice(i * 2, i * 2 + 2), 16);
+  }
+  return bytes;
+}
+
+/** Wrap a 32-byte digest as an IrHash (inverse of irHashToBytes). */
+export function irHashFromBytes(bytes: Uint8Array): IrHash {
+  if (bytes.length !== 32) {
+    throw new Error(`IrHash requires 32 bytes, got ${bytes.length}.`);
+  }
+  let hex = '';
+  for (const byte of bytes) hex += byte.toString(16).padStart(2, '0');
+  return irHashFromHex(hex);
+}
