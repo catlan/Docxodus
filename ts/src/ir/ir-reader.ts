@@ -34,7 +34,7 @@ import {
 import type { IrInline } from './ir-inlines.js';
 import { irHashCompute, irHashToBytes, type IrHash } from './ir-hash.js';
 import { EMPTY_COMMENT_STORE, EMPTY_NOTE_STORE, type IrCommentStore, type IrHeaderFooter, type IrHeaderFooterKind, type IrHeaderFooterRef, type IrNoteStore } from './ir-notes.js';
-import { emptyIrProvenance } from './ir-provenance.js';
+import { emptyIrProvenance, type IrProvenance } from './ir-provenance.js';
 import { kindFor, isListItem } from './kind-for.js';
 import { A, R, REL, W, WP } from './names.js';
 import { assignToAllElementsDeterministic, type UnidMap } from './unid-helper.js';
@@ -55,6 +55,7 @@ export interface IrDocument {
   readonly styles: IrStyleRegistry;
   readonly numbering: IrNumberingRegistry;
   readonly anchorIndex: ReadonlyMap<string, IrBlock>;
+  readonly parsedPartRoots?: ReadonlyMap<string, XElement>;
 }
 
 export interface IrReaderOptions {
@@ -91,6 +92,7 @@ interface ReadContext {
   readonly parts: ReadonlyMap<string, Uint8Array> | Record<string, Uint8Array>;
   readonly relResolver: (relId: string) => string;
   readonly textboxDepth: number;
+  readonly retainSources: boolean;
 }
 
 interface PackagePart {
@@ -147,12 +149,14 @@ const SECTPR_CONSUMED = new Set([W.pgSz, W.pgMar, W.type].map(nameKey));
 
 export function readIrDocument(
   partsOrDocx: ReadonlyMap<string, Uint8Array> | Uint8Array,
-  _options: IrReaderOptions = {},
+  options: IrReaderOptions = {},
 ): IrDocument {
+  const retainSources = options.retainSources === true;
   const parts = partsOrDocx instanceof Uint8Array ? unzipSync(partsOrDocx) : partsOrDocx;
   const documentXml = getPartText(parts, 'word/document.xml');
   if (documentXml === null) throw new Error('Document has no word/document.xml part.');
   const root = parseXml(documentXml);
+  const parsedPartRoots = retainSources ? new Map<string, XElement>([['/word/document.xml', root]]) : undefined;
   const body = root.element(W.body);
   if (!body) throw new Error('Document has no w:body element.');
   for (const el of body.descendants()) {
@@ -162,6 +166,7 @@ export function readIrDocument(
   }
 
   const stylesRoot = parseOptionalXml(getPartText(parts, 'word/styles.xml'));
+  if (stylesRoot && parsedPartRoots) parsedPartRoots.set('/word/styles.xml', stylesRoot);
   const mainPart = packagePart(parts, 'word/document.xml');
   const unids = assignToAllElementsDeterministic(root);
   const styles = buildStyleRegistry(stylesRoot);
@@ -177,6 +182,7 @@ export function readIrDocument(
     parts,
     relResolver: makeRelResolver(parts, mainPart),
     textboxDepth: 0,
+    retainSources,
   };
 
   const blocks: IrBlock[] = [];
@@ -184,12 +190,12 @@ export function readIrDocument(
   const anchorIndex = new Map<string, IrBlock>();
   for (const block of blocks) indexBlock(block, anchorIndex);
 
-  const headers = readHeaderFooterScopes(parts, body, stylesRoot, styles, numbering, anchorIndex, 'hdr', W.headerReference);
-  const footers = readHeaderFooterScopes(parts, body, stylesRoot, styles, numbering, anchorIndex, 'ftr', W.footerReference);
-  const footnotes = readNoteStore(parts, stylesRoot, styles, numbering, anchorIndex, 'word/footnotes.xml', 'fn', W.footnote);
-  const endnotes = readNoteStore(parts, stylesRoot, styles, numbering, anchorIndex, 'word/endnotes.xml', 'en', W.endnote);
+  const headers = readHeaderFooterScopes(parts, body, stylesRoot, styles, numbering, anchorIndex, 'hdr', W.headerReference, retainSources, parsedPartRoots);
+  const footers = readHeaderFooterScopes(parts, body, stylesRoot, styles, numbering, anchorIndex, 'ftr', W.footerReference, retainSources, parsedPartRoots);
+  const footnotes = readNoteStore(parts, stylesRoot, styles, numbering, anchorIndex, 'word/footnotes.xml', 'fn', W.footnote, retainSources, parsedPartRoots);
+  const endnotes = readNoteStore(parts, stylesRoot, styles, numbering, anchorIndex, 'word/endnotes.xml', 'en', W.endnote, retainSources, parsedPartRoots);
 
-  return {
+  const doc: IrDocument = {
     body: { name: 'body', blocks, partUri: '/word/document.xml' },
     headers,
     footers,
@@ -200,6 +206,7 @@ export function readIrDocument(
     numbering,
     anchorIndex,
   };
+  return parsedPartRoots ? { ...doc, parsedPartRoots } : doc;
 }
 
 function getPartText(parts: ReadonlyMap<string, Uint8Array> | Record<string, Uint8Array>, name: string): string | null {
@@ -319,6 +326,15 @@ function anchorFor(kind: IrAnchorKind, el: XElement, ctx: ReadContext): IrAnchor
   return irAnchor(kind, ctx.scope, unid(el, ctx));
 }
 
+function provenanceFor(el: XElement, ctx: ReadContext, flags: Partial<Pick<IrProvenance, 'fromBlockSdt'>> = {}): IrProvenance {
+  if (!ctx.retainSources) return emptyIrProvenance;
+  return {
+    element: el,
+    partUri: ctx.part.uri,
+    fromBlockSdt: flags.fromBlockSdt ?? false,
+  };
+}
+
 function buildParagraph(p: XElement, ctx: ReadContext): IrParagraph {
   const kind = kindFor(p, ctx.stylesRoot) ?? 'p';
   const pPr = p.element(W.pPr);
@@ -339,7 +355,7 @@ function buildParagraph(p: XElement, ctx: ReadContext): IrParagraph {
     isListItemForLayout: isListItem(p, ctx.stylesRoot),
     contentHash: computeParagraphContentHash(processed),
     formatFingerprint: fingerprintBlock(format, runFormatsInOrder(processed), inlineSectionFormat),
-    source: emptyIrProvenance,
+    source: provenanceFor(p, ctx),
   };
 }
 
@@ -727,7 +743,7 @@ function buildTable(tbl: XElement, ctx: ReadContext): IrTable {
     tblGridDigest,
     contentHash: contentBuilder.build(),
     formatFingerprint: fp.build(),
-    source: emptyIrProvenance,
+    source: provenanceFor(tbl, ctx),
   };
 }
 
@@ -748,7 +764,7 @@ function buildRow(tr: XElement, ctx: ReadContext): { row: IrRow; fingerprints: I
     anchor: anchorFor('tr', tr, ctx),
     cells,
     contentHash: builder.build(),
-    source: emptyIrProvenance,
+    source: provenanceFor(tr, ctx),
     trPrDigest: shellChildrenDigest([...tr.elements()].filter((e) => !nameEquals(e.name, W.tc))),
     trPrShellDigest: shellChildrenDigest(trPr ? [trPr] : []),
     trPrExDigest: shellChildrenDigest([...tr.elements(W.tblPrEx)]),
@@ -782,7 +798,7 @@ function buildCell(tc: XElement, ctx: ReadContext): { cell: IrCell; fingerprints
       gridSpan: intAttr(tcPr?.element(W.gridSpan) ?? null, W.val) ?? 1,
       vMerge: mapVMerge(tcPr?.element(W.vMerge) ?? null),
       contentHash: builder.build(),
-      source: emptyIrProvenance,
+      source: provenanceFor(tc, ctx),
       shellDigest,
       tcPrShellDigest: shellChildrenDigest(tcPr ? [tcPr] : []),
       fromRowSdt: false,
@@ -805,7 +821,7 @@ function buildSectionBreak(sectPr: XElement, ctx: ReadContext): IrSectionBreak {
     format,
     contentHash: builder.build(),
     formatFingerprint: fingerprintSectionFormat(format),
-    source: emptyIrProvenance,
+    source: provenanceFor(sectPr, ctx),
   };
 }
 
@@ -833,7 +849,7 @@ function buildOpaqueBlock(el: XElement, ctx: ReadContext): IrOpaqueBlock {
     elementName: el.name,
     contentHash: canonicalHash(el, ctx.relResolver),
     formatFingerprint: EMPTY_UNMODELED_DIGEST,
-    source: emptyIrProvenance,
+    source: provenanceFor(el, ctx),
   };
 }
 
@@ -930,6 +946,8 @@ function readHeaderFooterScopes(
   anchorIndex: Map<string, IrBlock>,
   scopePrefix: 'hdr' | 'ftr',
   referenceName: XName,
+  retainSources: boolean,
+  parsedPartRoots: Map<string, XElement> | undefined,
 ): IrHeaderFooter[] {
   const mainPart = packagePart(parts, 'word/document.xml');
   const partNames = mainPart.rels
@@ -941,6 +959,7 @@ function readHeaderFooterScopes(
     const xml = getPartText(parts, partName);
     if (xml === null) continue;
     const root = parseXml(xml);
+    if (parsedPartRoots) parsedPartRoots.set(`/${partName}`, root);
     const unids = assignToAllElementsDeterministic(root);
     const part = packagePart(parts, partName);
     const ctx: ReadContext = {
@@ -954,6 +973,7 @@ function readHeaderFooterScopes(
       parts,
       relResolver: makeRelResolver(parts, part),
       textboxDepth: 0,
+      retainSources,
     };
     const blocks: IrBlock[] = [];
     for (const child of root.elements()) appendBlocks(child, ctx, blocks);
@@ -1001,10 +1021,13 @@ function readNoteStore(
   partName: string,
   scopeName: 'fn' | 'en',
   noteName: XName,
+  retainSources: boolean,
+  parsedPartRoots: Map<string, XElement> | undefined,
 ): IrNoteStore {
   const xml = getPartText(parts, partName);
   if (xml === null) return EMPTY_NOTE_STORE;
   const root = parseXml(xml);
+  if (parsedPartRoots) parsedPartRoots.set(`/${partName}`, root);
   const unids = assignToAllElementsDeterministic(root);
   const part = packagePart(parts, partName);
   const ctx: ReadContext = {
@@ -1018,6 +1041,7 @@ function readNoteStore(
     parts,
     relResolver: makeRelResolver(parts, part),
     textboxDepth: 0,
+    retainSources,
   };
   const notes = new Map<string, IrScope>();
   const noteUnids = new Map<string, string>();

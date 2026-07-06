@@ -4,6 +4,7 @@
 // land in subsequent phases; see diff.tools docs/word-diff-plan.md §v2.
 
 export * from './xml/xelement.js';
+export * from './xml/xwriter.js';
 export * from './ir/names.js';
 export * from './ir/short-hash.js';
 export * from './ir/ir-hash.js';
