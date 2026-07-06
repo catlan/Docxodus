@@ -94,6 +94,12 @@ export const W = {
   del: xname(W_NS, 'del'),
   footnote: xname(W_NS, 'footnote'),
   endnote: xname(W_NS, 'endnote'),
+  headerReference: xname(W_NS, 'headerReference'),
+  footerReference: xname(W_NS, 'footerReference'),
+  comment: xname(W_NS, 'comment'),
+  author: xname(W_NS, 'author'),
+  initials: xname(W_NS, 'initials'),
+  date: xname(W_NS, 'date'),
 } as const satisfies Record<string, XName>;
 
 export const R_NS =

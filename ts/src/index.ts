@@ -13,6 +13,7 @@ export * from './ir/ir-formats.js';
 export * from './ir/ir-provenance.js';
 export * from './ir/ir-inlines.js';
 export * from './ir/ir-blocks.js';
+export * from './ir/ir-notes.js';
 export * from './ir-diff/ir-diff-token.js';
 export * from './ir-diff/ir-diff-settings.js';
 export * from './ir-diff/ir-diff-tokenizer.js';

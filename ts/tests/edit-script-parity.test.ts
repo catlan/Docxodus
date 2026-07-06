@@ -63,10 +63,6 @@ function stageAReaderSkipReason(leftName: string, rightName: string): string | n
   ) {
     return 'stage-A reader requires revision-free body XML';
   }
-  if (/Foot[Nn]ote|Endnote/.test(pair)) return 'stage-A reader emits note refs but does not load footnote/endnote stores';
-  if (/Textbox|Text-Box/.test(pair)) return 'stage-A reader preserves textbox carriers opaquely instead of modeling textbox bodies';
-  if (/BodyBookmarks|WC004-Large/.test(pair)) return 'stage-A reader does not load header/footer stories';
-  if (/WC013-Image-Before2|WC013-Image-After2/.test(pair)) return 'stage-A reader opaque drawing/image relationship limit';
   return null;
 }
 

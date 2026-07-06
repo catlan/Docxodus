@@ -33,6 +33,7 @@ import {
 } from './ir-formats.js';
 import type { IrInline } from './ir-inlines.js';
 import { irHashCompute, irHashToBytes, type IrHash } from './ir-hash.js';
+import { EMPTY_COMMENT_STORE, EMPTY_NOTE_STORE, type IrCommentStore, type IrHeaderFooter, type IrHeaderFooterKind, type IrHeaderFooterRef, type IrNoteStore } from './ir-notes.js';
 import { emptyIrProvenance } from './ir-provenance.js';
 import { kindFor, isListItem } from './kind-for.js';
 import { A, R, REL, W, WP } from './names.js';
@@ -46,11 +47,11 @@ export interface IrScope {
 
 export interface IrDocument {
   readonly body: IrScope;
-  readonly headers: ReadonlyArray<never>;
-  readonly footers: ReadonlyArray<never>;
-  readonly footnotes: ReadonlyMap<string, IrScope>;
-  readonly endnotes: ReadonlyMap<string, IrScope>;
-  readonly comments: ReadonlyArray<never>;
+  readonly headers: ReadonlyArray<IrHeaderFooter>;
+  readonly footers: ReadonlyArray<IrHeaderFooter>;
+  readonly footnotes: IrNoteStore;
+  readonly endnotes: IrNoteStore;
+  readonly comments: IrCommentStore;
   readonly styles: IrStyleRegistry;
   readonly numbering: IrNumberingRegistry;
   readonly anchorIndex: ReadonlyMap<string, IrBlock>;
@@ -86,12 +87,32 @@ interface ReadContext {
   readonly styles: IrStyleRegistry;
   readonly numbering: IrNumberingRegistry;
   readonly hyperlinks: ReadonlyMap<string, string>;
+  readonly part: PackagePart;
+  readonly parts: ReadonlyMap<string, Uint8Array> | Record<string, Uint8Array>;
+  readonly relResolver: (relId: string) => string;
+  readonly textboxDepth: number;
+}
+
+interface PackagePart {
+  readonly name: string;
+  readonly uri: string;
+  readonly rels: ReadonlyArray<PackageRel>;
+  readonly relsById: ReadonlyMap<string, PackageRel>;
+}
+
+interface PackageRel {
+  readonly id: string;
+  readonly type: string;
+  readonly target: string;
+  readonly targetMode: string | null;
+  readonly targetPart: string | null;
 }
 
 const EMPTY_HASH = irHashCompute(new Uint8Array());
 const EMPTY_UNMODELED_DIGEST = canonicalHash(syntheticElement('unmodeled'));
 const EMPTY_SHELL_DIGEST = canonicalHash(syntheticElement('shell'));
 const EMPTY_PPR_PROPS_DIGEST = canonicalHash(syntheticElement('ppr-props'));
+const MAX_TEXTBOX_DEPTH = 16;
 
 const nameKey = (name: XName): string => `${name.ns}\0${name.local}`;
 
@@ -141,7 +162,7 @@ export function readIrDocument(
   }
 
   const stylesRoot = parseOptionalXml(getPartText(parts, 'word/styles.xml'));
-  const relsRoot = parseOptionalXml(getPartText(parts, 'word/_rels/document.xml.rels'));
+  const mainPart = packagePart(parts, 'word/document.xml');
   const unids = assignToAllElementsDeterministic(root);
   const styles = buildStyleRegistry(stylesRoot);
   const numbering = buildEmptyNumberingRegistry();
@@ -151,7 +172,11 @@ export function readIrDocument(
     stylesRoot,
     styles,
     numbering,
-    hyperlinks: buildHyperlinkMap(relsRoot),
+    hyperlinks: buildHyperlinkMap(mainPart.rels),
+    part: mainPart,
+    parts,
+    relResolver: makeRelResolver(parts, mainPart),
+    textboxDepth: 0,
   };
 
   const blocks: IrBlock[] = [];
@@ -159,13 +184,18 @@ export function readIrDocument(
   const anchorIndex = new Map<string, IrBlock>();
   for (const block of blocks) indexBlock(block, anchorIndex);
 
+  const headers = readHeaderFooterScopes(parts, body, stylesRoot, styles, numbering, anchorIndex, 'hdr', W.headerReference);
+  const footers = readHeaderFooterScopes(parts, body, stylesRoot, styles, numbering, anchorIndex, 'ftr', W.footerReference);
+  const footnotes = readNoteStore(parts, stylesRoot, styles, numbering, anchorIndex, 'word/footnotes.xml', 'fn', W.footnote);
+  const endnotes = readNoteStore(parts, stylesRoot, styles, numbering, anchorIndex, 'word/endnotes.xml', 'en', W.endnote);
+
   return {
     body: { name: 'body', blocks, partUri: '/word/document.xml' },
-    headers: [],
-    footers: [],
-    footnotes: new Map(),
-    endnotes: new Map(),
-    comments: [],
+    headers,
+    footers,
+    footnotes,
+    endnotes,
+    comments: EMPTY_COMMENT_STORE,
     styles,
     numbering,
     anchorIndex,
@@ -180,12 +210,97 @@ function getPartText(parts: ReadonlyMap<string, Uint8Array> | Record<string, Uin
   return bytes ? strFromU8(bytes) : null;
 }
 
+function getPartBytes(parts: ReadonlyMap<string, Uint8Array> | Record<string, Uint8Array>, name: string): Uint8Array | null {
+  return typeof (parts as ReadonlyMap<string, Uint8Array>).get === 'function'
+    ? (parts as ReadonlyMap<string, Uint8Array>).get(name) ?? null
+    : (parts as Record<string, Uint8Array>)[name] ?? null;
+}
+
 function parseOptionalXml(xml: string | null): XElement | null {
   return xml === null ? null : parseXml(xml);
 }
 
+function packagePart(parts: ReadonlyMap<string, Uint8Array> | Record<string, Uint8Array>, name: string): PackagePart {
+  const rels = readPartRels(parts, name);
+  return {
+    name,
+    uri: `/${name}`,
+    rels,
+    relsById: new Map(rels.map((r) => [r.id, r])),
+  };
+}
+
+function readPartRels(parts: ReadonlyMap<string, Uint8Array> | Record<string, Uint8Array>, partName: string): PackageRel[] {
+  const slash = partName.lastIndexOf('/');
+  const dir = slash < 0 ? '' : partName.slice(0, slash + 1);
+  const file = slash < 0 ? partName : partName.slice(slash + 1);
+  const relsName = `${dir}_rels/${file}.rels`;
+  const root = parseOptionalXml(getPartText(parts, relsName));
+  if (!root) return [];
+  const rels: PackageRel[] = [];
+  for (const rel of root.elements(REL.Relationship)) {
+    const id = rel.attribute({ ns: '', local: 'Id' });
+    const type = rel.attribute({ ns: '', local: 'Type' }) ?? '';
+    const target = rel.attribute({ ns: '', local: 'Target' }) ?? '';
+    if (!id) continue;
+    const targetMode = rel.attribute({ ns: '', local: 'TargetMode' });
+    rels.push({
+      id,
+      type,
+      target,
+      targetMode,
+      targetPart: targetMode === 'External' ? null : resolveTargetPart(partName, target),
+    });
+  }
+  return rels;
+}
+
+function resolveTargetPart(sourcePart: string, target: string): string {
+  if (target.startsWith('/')) return target.slice(1);
+  const slash = sourcePart.lastIndexOf('/');
+  const base = slash < 0 ? '' : sourcePart.slice(0, slash + 1);
+  const stack: string[] = [];
+  for (const segment of `${base}${target}`.split('/')) {
+    if (segment === '' || segment === '.') continue;
+    if (segment === '..') stack.pop();
+    else stack.push(segment);
+  }
+  return stack.join('/');
+}
+
+function makeRelResolver(parts: ReadonlyMap<string, Uint8Array> | Record<string, Uint8Array>, part: PackagePart): (relId: string) => string {
+  const cache = new Map<string, string>();
+  return (relId) => {
+    const cached = cache.get(relId);
+    if (cached !== undefined) return cached;
+    const token = classifyRel(parts, part, relId);
+    cache.set(relId, token);
+    return token;
+  };
+}
+
+function classifyRel(parts: ReadonlyMap<string, Uint8Array> | Record<string, Uint8Array>, part: PackagePart, relId: string): string {
+  if (!relId) return 'unresolved';
+  const rel = part.relsById.get(relId);
+  if (!rel) return 'dangling';
+  if (rel.targetMode === 'External') return `ext:${rel.target}`;
+  if (!rel.targetPart) return 'unresolved';
+  if (rel.targetPart.toLowerCase().endsWith('.xml')) return 'xml-part';
+  const bytes = getPartBytes(parts, rel.targetPart);
+  return bytes ? `part-sha:${irHashCompute(bytes)}` : 'unresolved';
+}
+
 function appendBlocks(el: XElement, ctx: ReadContext, sink: IrBlock[]): void {
   if (isDroppedParagraphChild(el.name)) return;
+  if (nameEquals(el.name, W.sdt)) {
+    const content = el.element(W.sdtContent);
+    if (content) for (const child of content.elements()) appendBlocks(child, ctx, sink);
+    return;
+  }
+  if (nameEquals(el.name, W.smartTag)) {
+    for (const child of el.elements()) if (!nameEquals(child.name, W.smartTagPr)) appendBlocks(child, ctx, sink);
+    return;
+  }
   sink.push(buildBlock(el, ctx));
 }
 
@@ -322,12 +437,89 @@ function emitRunChild(child: XElement, rPr: XElement | null, runFormat: IrRunFor
   else if (nameEquals(child.name, W.sym)) appendSym(child, rPr, runFormat, sink);
   else if (nameEquals(child.name, W.footnoteReference)) sink.push({ kind: 'noteRef', noteKind: 'Footnote', noteId: child.attribute(W.id) ?? '' });
   else if (nameEquals(child.name, W.endnoteReference)) sink.push({ kind: 'noteRef', noteKind: 'Endnote', noteId: child.attribute(W.id) ?? '' });
+  else if (nameEquals(child.name, W.drawing)) appendDrawing(child, ctx, sink);
   else if (nameEquals(child.name, W.lastRenderedPageBreak) || nameEquals(child.name, W.commentReference) || isDroppedParagraphChild(child.name)) return;
-  else if (nameEquals(child.name, W.drawing) || hasDescendantOrSelf(child, W.txbxContent)) {
-    sink.push({ kind: 'opaqueInline', elementName: child.name, canonicalHash: canonicalHash(child) });
-  } else {
-    sink.push({ kind: 'opaqueInline', elementName: child.name, canonicalHash: canonicalHash(child) });
+  else if (hasDescendantOrSelf(child, W.txbxContent)) appendTextboxes(child, ctx, sink);
+  else sink.push({ kind: 'opaqueInline', elementName: child.name, canonicalHash: canonicalHash(child, ctx.relResolver) });
+}
+
+function appendDrawing(drawing: XElement, ctx: ReadContext, sink: IrInline[]): void {
+  const blip = firstDescendant(drawing, A.blip);
+  const embedId = blip?.attribute(R.embed);
+  let promotedImage = false;
+  if (embedId) {
+    const image = resolveImagePart(ctx, embedId);
+    if (image) {
+      const extent = firstDescendant(drawing, WP.extent);
+      const docPr = firstDescendant(drawing, WP.docPr);
+      sink.push({
+        kind: 'inlineImage',
+        partUri: `/${image.partName}`,
+        imageBytesHash: image.hash,
+        widthEmu: BigInt(longAttr(extent, { ns: '', local: 'cx' })),
+        heightEmu: BigInt(longAttr(extent, { ns: '', local: 'cy' })),
+        altText: docPr?.attribute({ ns: '', local: 'descr' }) ?? docPr?.attribute({ ns: '', local: 'name' }) ?? null,
+        unid: unid(drawing, ctx) || null,
+      });
+      promotedImage = true;
+    }
   }
+  if (hasDescendantOrSelf(drawing, W.txbxContent)) {
+    appendTextboxes(drawing, ctx, sink);
+    return;
+  }
+  if (!promotedImage) sink.push({ kind: 'opaqueInline', elementName: drawing.name, canonicalHash: canonicalHash(drawing, ctx.relResolver) });
+}
+
+function resolveImagePart(ctx: ReadContext, embedId: string): { readonly partName: string; readonly hash: IrHash } | null {
+  const rel = ctx.part.relsById.get(embedId);
+  if (!rel?.targetPart || rel.targetMode === 'External') return null;
+  if (!rel.type.endsWith('/image')) return null;
+  const bytes = getPartBytes(ctx.parts, rel.targetPart);
+  return bytes ? { partName: rel.targetPart, hash: irHashCompute(bytes) } : null;
+}
+
+function appendTextboxes(carrier: XElement, ctx: ReadContext, sink: IrInline[]): void {
+  for (const txbx of outermostTextboxBodies(carrier)) {
+    if (ctx.textboxDepth >= MAX_TEXTBOX_DEPTH) {
+      sink.push({ kind: 'opaqueInline', elementName: txbx.name, canonicalHash: canonicalHash(txbx, ctx.relResolver) });
+      continue;
+    }
+    const innerCtx: ReadContext = { ...ctx, textboxDepth: ctx.textboxDepth + 1 };
+    const blocks: IrBlock[] = [];
+    for (const child of txbx.elements()) appendBlocks(child, innerCtx, blocks);
+    sink.push({ kind: 'textbox', blocks });
+  }
+}
+
+function outermostTextboxBodies(root: XElement): XElement[] {
+  const bodies: XElement[] = [];
+  for (const txbx of descendantsAndSelf(root, W.txbxContent)) {
+    let nested = false;
+    for (let p = txbx.parent; p && p !== root; p = p.parent) {
+      if (nameEquals(p.name, W.txbxContent)) {
+        nested = true;
+        break;
+      }
+    }
+    if (!nested) bodies.push(txbx);
+  }
+  return bodies;
+}
+
+function* descendantsAndSelf(root: XElement, name: XName): IterableIterator<XElement> {
+  if (nameEquals(root.name, name)) yield root;
+  yield* root.descendants(name);
+}
+
+function firstDescendant(root: XElement, name: XName): XElement | null {
+  for (const el of root.descendants(name)) return el;
+  return null;
+}
+
+function longAttr(el: XElement | null | undefined, name: XName): string {
+  const raw = el?.attribute(name);
+  return raw && /^-?\d+$/.test(raw) ? raw : '0';
 }
 
 function buildHyperlink(hyperlink: XElement, ctx: ReadContext): IrInline {
@@ -606,7 +798,7 @@ function mapVMerge(vMerge: XElement | null): IrVMerge {
 function buildSectionBreak(sectPr: XElement, ctx: ReadContext): IrSectionBreak {
   const format = mapSectionFormat(sectPr);
   const builder = new IrContentHashBuilder();
-  builder.appendHash(canonicalHash(sectPr));
+  builder.appendHash(canonicalHash(sectPr, ctx.relResolver));
   return {
     kind: 'sectionBreak',
     anchor: anchorFor('sec', sectPr, ctx),
@@ -639,7 +831,7 @@ function buildOpaqueBlock(el: XElement, ctx: ReadContext): IrOpaqueBlock {
     kind: 'opaqueBlock',
     anchor: anchorFor('unk', el, ctx),
     elementName: el.name,
-    contentHash: canonicalHash(el),
+    contentHash: canonicalHash(el, ctx.relResolver),
     formatFingerprint: EMPTY_UNMODELED_DIGEST,
     source: emptyIrProvenance,
   };
@@ -723,16 +915,128 @@ function buildEmptyNumberingRegistry(): IrNumberingRegistry {
   return { nums: new Map(), abstractNums: new Map() };
 }
 
-function buildHyperlinkMap(root: XElement | null): ReadonlyMap<string, string> {
+function buildHyperlinkMap(rels: ReadonlyArray<PackageRel>): ReadonlyMap<string, string> {
   const map = new Map<string, string>();
-  if (!root) return map;
-  for (const rel of root.elements(REL.Relationship)) {
-    const id = rel.attribute({ ns: '', local: 'Id' });
-    const target = rel.attribute({ ns: '', local: 'Target' });
-    const type = rel.attribute({ ns: '', local: 'Type' });
-    if (id && target && type?.endsWith('/hyperlink')) map.set(id, target);
-  }
+  for (const rel of rels) if (rel.type.endsWith('/hyperlink')) map.set(rel.id, rel.target);
   return map;
+}
+
+function readHeaderFooterScopes(
+  parts: ReadonlyMap<string, Uint8Array> | Record<string, Uint8Array>,
+  body: XElement,
+  stylesRoot: XElement | null,
+  styles: IrStyleRegistry,
+  numbering: IrNumberingRegistry,
+  anchorIndex: Map<string, IrBlock>,
+  scopePrefix: 'hdr' | 'ftr',
+  referenceName: XName,
+): IrHeaderFooter[] {
+  const mainPart = packagePart(parts, 'word/document.xml');
+  const partNames = mainPart.rels
+    .filter((r) => r.targetPart && (scopePrefix === 'hdr' ? /\/?header\d*\.xml$/i : /\/?footer\d*\.xml$/i).test(r.targetPart))
+    .map((r) => r.targetPart!);
+  const result: IrHeaderFooter[] = [];
+  let i = 1;
+  for (const partName of partNames) {
+    const xml = getPartText(parts, partName);
+    if (xml === null) continue;
+    const root = parseXml(xml);
+    const unids = assignToAllElementsDeterministic(root);
+    const part = packagePart(parts, partName);
+    const ctx: ReadContext = {
+      scope: `${scopePrefix}${i++}`,
+      unids,
+      stylesRoot,
+      styles,
+      numbering,
+      hyperlinks: buildHyperlinkMap(part.rels),
+      part,
+      parts,
+      relResolver: makeRelResolver(parts, part),
+      textboxDepth: 0,
+    };
+    const blocks: IrBlock[] = [];
+    for (const child of root.elements()) appendBlocks(child, ctx, blocks);
+    for (const block of blocks) indexBlock(block, anchorIndex);
+    const references = collectHeaderFooterReferences(body, mainPart, partName, referenceName);
+    const kind = references[0]?.kind ?? 'Default';
+    result.push({
+      scopeName: ctx.scope,
+      kind,
+      scope: { name: ctx.scope, blocks, partUri: `/${partName}` },
+      references,
+    });
+  }
+  return result;
+}
+
+function collectHeaderFooterReferences(
+  body: XElement,
+  mainPart: PackagePart,
+  partName: string,
+  referenceName: XName,
+): IrHeaderFooterRef[] {
+  const relId = mainPart.rels.find((r) => r.targetPart === partName)?.id;
+  if (!relId) return [];
+  const refs: IrHeaderFooterRef[] = [];
+  let sectionIndex = 0;
+  for (const sectPr of body.descendants(W.sectPr)) {
+    for (const reference of sectPr.elements(referenceName)) {
+      if (reference.attribute(R.id) !== relId) continue;
+      const type = reference.attribute(W.type);
+      const kind: IrHeaderFooterKind = type === 'first' ? 'First' : type === 'even' ? 'Even' : 'Default';
+      refs.push({ sectionIndex, kind });
+    }
+    sectionIndex++;
+  }
+  return refs;
+}
+
+function readNoteStore(
+  parts: ReadonlyMap<string, Uint8Array> | Record<string, Uint8Array>,
+  stylesRoot: XElement | null,
+  styles: IrStyleRegistry,
+  numbering: IrNumberingRegistry,
+  anchorIndex: Map<string, IrBlock>,
+  partName: string,
+  scopeName: 'fn' | 'en',
+  noteName: XName,
+): IrNoteStore {
+  const xml = getPartText(parts, partName);
+  if (xml === null) return EMPTY_NOTE_STORE;
+  const root = parseXml(xml);
+  const unids = assignToAllElementsDeterministic(root);
+  const part = packagePart(parts, partName);
+  const ctx: ReadContext = {
+    scope: scopeName,
+    unids,
+    stylesRoot,
+    styles,
+    numbering,
+    hyperlinks: buildHyperlinkMap(part.rels),
+    part,
+    parts,
+    relResolver: makeRelResolver(parts, part),
+    textboxDepth: 0,
+  };
+  const notes = new Map<string, IrScope>();
+  const noteUnids = new Map<string, string>();
+  for (const noteEl of root.elements(noteName)) {
+    if (isBoilerplateNote(noteEl)) continue;
+    const id = noteEl.attribute(W.id);
+    if (!id || notes.has(id)) continue;
+    const blocks: IrBlock[] = [];
+    for (const child of noteEl.elements()) appendBlocks(child, ctx, blocks);
+    for (const block of blocks) indexBlock(block, anchorIndex);
+    notes.set(id, { name: scopeName, blocks, partUri: `/${partName}` });
+    noteUnids.set(id, unid(noteEl, ctx));
+  }
+  return { notes, noteUnids };
+}
+
+function isBoilerplateNote(noteEl: XElement): boolean {
+  const type = noteEl.attribute(W.type);
+  return type === 'separator' || type === 'continuationSeparator' || type === 'continuationNotice';
 }
 
 function indexBlock(block: IrBlock, index: Map<string, IrBlock>): void {
@@ -741,6 +1045,16 @@ function indexBlock(block: IrBlock, index: Map<string, IrBlock>): void {
   index.set(key, block);
   if (block.kind === 'table') {
     for (const row of block.rows) for (const cell of row.cells) for (const child of cell.blocks) indexBlock(child, index);
+  } else if (block.kind === 'paragraph') {
+    indexTextboxes(block.inlines, index);
+  }
+}
+
+function indexTextboxes(inlines: ReadonlyArray<IrInline>, index: Map<string, IrBlock>): void {
+  for (const inline of inlines) {
+    if (inline.kind === 'textbox') for (const block of inline.blocks) indexBlock(block, index);
+    else if (inline.kind === 'fieldRun') indexTextboxes(inline.cachedResult, index);
+    else if (inline.kind === 'hyperlink') indexTextboxes(inline.inlines, index);
   }
 }
 
