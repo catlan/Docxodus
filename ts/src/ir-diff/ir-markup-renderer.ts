@@ -5,10 +5,10 @@ import type { IrBlock, IrParagraph, IrTable } from '../ir/ir-blocks.js';
 import { readIrDocument, type IrDocument } from '../ir/ir-reader.js';
 import { tokenizeIrParagraph } from './ir-diff-tokenizer.js';
 import { normalizeIrDiffSettings, type IrDiffSettings, type IrDiffSettingsOptions } from './ir-diff-settings.js';
-import type { IrCellOp, IrEditOp, IrEditScript, IrNoteDiff, IrRowOp, IrTableDiff } from './ir-edit-script.js';
+import type { IrCellOp, IrEditOp, IrEditScript, IrHeaderFooterDiff, IrNoteDiff, IrRowOp, IrTableDiff } from './ir-edit-script.js';
 import type { IrDiffToken } from './ir-diff-token.js';
 import type { IrTokenDiff, IrTokenOp } from './ir-token-diff.js';
-import { writeXmlPart } from '../xml/xwriter.js';
+import { writeXmlPart, writeXmlPartFormatted } from '../xml/xwriter.js';
 import { XElement, nameEquals, parseXml, xname, type XAttributeInfo, type XName } from '../xml/xelement.js';
 import { attr, childrenElements, cloneElement, descendantsAndSelf, element, replaceName, type XChild } from '../xml/xclone.js';
 
@@ -92,13 +92,18 @@ export function renderIrMarkup(
   const result = new Map<string, Uint8Array>();
   for (const [name, bytes] of Object.entries(leftParts)) result.set(name, bytes);
 
-  const imported = importRightRelatedParts(stripUnids(replaceChild(root, body, newBody)), result, rightParts, 'word/document.xml', 'word/document.xml');
+  // Import media referenced by RIGHT-sourced clones (registry-based, per attribute occurrence,
+  // no dedup — the C# MoveRelatedPartsToDestination semantics). Mutates the registered clones'
+  // relationship ids IN PLACE, so it must run BEFORE the functional stripUnids deep-clone below.
+  importRightSourcedMedia(state, result, rightParts);
+  const imported = stripUnids(replaceChild(root, body, newBody));
   renderNoteScopes(script, state, result, leftParts, rightParts);
+  renderHeaderFooterScopes(script, state, result, rightParts, imported);
   const footnoteRemap = renumberNoteIds(imported, result, 'word/footnotes.xml', W.footnoteReference, W.footnote, W_FOOTNOTES);
   const endnoteRemap = renumberNoteIds(imported, result, 'word/endnotes.xml', W.endnoteReference, W.endnote, W_ENDNOTES);
   remapNestedNoteReferences(result, footnoteRemap, endnoteRemap);
   const normalized = normalizeBookmarks(imported, bodyBookmarkNames(left), bodyBookmarkNames(right));
-  const remapped = remapHyperlinkRelationshipCollisions(normalized, leftParts, rightParts);
+  const remapped = remapHyperlinkRelationshipCollisions(normalized, result, rightParts);
   const outputShape = linqOutputShape(remapped.root);
   const newRoot = cloneElement(outputShape, {
     documentProlog: hasRevisionMarkup(rightParts['word/document.xml']) && !hasRenderedRevisionMarkup(outputShape)
@@ -250,6 +255,7 @@ function wrapRunLevel(runLevel: XElement, kind: RevKind, state: RenderState): XE
   }
   const clone = cloneElement(runLevel);
   const child = isDeleteGrade(kind) ? convertTextToDelText(clone) : clone;
+  if (!isDeleteGrade(kind)) registerRightSourcedClone(child, state);
   return element(revElementName(kind), revisionAttrs(state), [child]);
 }
 
@@ -338,11 +344,18 @@ function buildTokenOpContent(
       }
       case 'FormatChanged': {
         const [rs, re] = rightSpanChars(rightTokens, op);
+        const [ls] = leftSpanChars(leftTokens, op);
         const [zs, ze] = zeroWidthBoundaries(rightTokens, op.rightStart, op.rightEnd);
+        // Text-equal span: the left char at offset k matches the right char at offset k, so each
+        // emitted right run's OLD rPr comes from the left run at the ALIGNED char — a cursor per
+        // stamped run, not the span start (runs inside the span can carry different left formats).
+        let cursor = rs;
         for (const r of rightRuns.slice(rs, re, zs, ze)) {
-          const leftRPr = leftRuns.rPrAtChar(leftSpanChars(leftTokens, op)[0]);
-          for (const run of runsForFormatStamp(r)) applyRPrChange(run, leftRPr, state);
           registerRightSourcedClone(r, state);
+          for (const run of runsForFormatStamp(r)) {
+            applyRPrChange(run, leftRuns.rPrAtChar(ls + (cursor - rs)), state);
+            cursor += runTextLength(run);
+          }
           content.push(r);
         }
         break;
@@ -374,6 +387,7 @@ function emitFormatOnlyParagraph(op: IrEditOp, state: RenderState, sink: XElemen
   const leftRuns = new SourceRunModel(leftPara);
   const out = stripUnids(cloneElement(rightPara));
   applyBlockFormatChanges(out, leftPara, rightPara, state);
+  for (const child of childrenElements(out).filter((e) => !nameEquals(e.name, W.pPr))) registerRightSourcedClone(child, state);
   let cursor = 0;
   for (const child of childrenElements(out).filter((e) => !nameEquals(e.name, W.pPr))) {
     for (const run of runsForFormatStamp(child)) {
@@ -389,6 +403,7 @@ function emitFormatOnlyTable(op: IrEditOp, state: RenderState, sink: XElement[])
   const rightTbl = sourceElement(op.rightAnchor, state.right);
   if (!leftTbl || !rightTbl) return emitVerbatim(op.rightAnchor, state.right, sink);
   const out = stripUnids(cloneElement(rightTbl));
+  registerRightSourcedClone(out, state);
   applyTableLevelShellChanges(out, leftTbl, state);
   sink.push(out);
 }
@@ -414,6 +429,7 @@ function renderRowOp(rowOp: IrRowOp, leftRows: Map<string, XElement>, rightRows:
     const src = rightRows.get(rowOp.rightRowAnchor ?? '');
     if (!src) return false;
     let row = stripUnids(cloneElement(src));
+    registerRightSourcedClone(row, state);
     const left = rowOp.leftRowAnchor ? leftRows.get(rowOp.leftRowAnchor) : undefined;
     if (left) row = applyRowAndCellShellChanges(row, left, state);
     newTbl.children.push(row);
@@ -422,7 +438,9 @@ function renderRowOp(rowOp: IrRowOp, leftRows: Map<string, XElement>, rightRows:
   if (rowOp.kind === 'InsertRow' || (rowOp.kind === 'MovedRow' && !rowOp.isMoveSource)) {
     const src = rightRows.get(rowOp.rightRowAnchor ?? '');
     if (!src) return false;
-    newTbl.children.push(markWholeRow(stripUnids(cloneElement(src)), 'Ins', state));
+    const row = markWholeRow(stripUnids(cloneElement(src)), 'Ins', state);
+    registerRightSourcedClone(row, state);
+    newTbl.children.push(row);
     return true;
   }
   if (rowOp.kind === 'DeleteRow' || (rowOp.kind === 'MovedRow' && rowOp.isMoveSource)) {
@@ -441,6 +459,7 @@ function renderModifyRow(rowOp: IrRowOp, leftRows: Map<string, XElement>, rightR
   const leftSrc = rowOp.leftRowAnchor ? leftRows.get(rowOp.leftRowAnchor) : undefined;
   if (!rowOp.cellOps) {
     let row = stripUnids(cloneElement(rightSrc));
+    registerRightSourcedClone(row, state);
     if (leftSrc) row = applyRowAndCellShellChanges(row, leftSrc, state);
     newTbl.children.push(row);
     return true;
@@ -456,6 +475,7 @@ function renderModifyRow(rowOp: IrRowOp, leftRows: Map<string, XElement>, rightR
     newRow.children.push(renderCell(cellOp, cellSrc, state));
   }
   for (; ci < rightCells.length; ci++) newRow.children.push(stripUnids(cloneElement(rightCells[ci]!)));
+  registerRightSourcedClone(newRow, state);
   const out = leftSrc ? applyRowAndCellShellChanges(newRow, leftSrc, state) : newRow;
   newTbl.children.push(out);
   return true;
@@ -552,6 +572,7 @@ function emitMoveDestination(op: IrEditOp, state: RenderState, sink: XElement[])
     }
   }
   const dest = stripUnids(cloneElement(src));
+  registerRightSourcedClone(dest, state);
   const left = sourceElement(op.leftAnchor, state.left);
   if (left) applyBlockFormatChanges(dest, left, src, state);
   markWholeParagraph(dest, 'MoveTo', state);
@@ -869,10 +890,11 @@ function linqOutputShape(el: XElement): XElement {
 
 function remapHyperlinkRelationshipCollisions(
   root: XElement,
-  leftParts: Record<string, Uint8Array>,
+  outParts: ReadonlyMap<string, Uint8Array>,
   rightParts: Record<string, Uint8Array>,
 ): { readonly root: XElement; readonly relationshipsXml: string | null } {
-  const leftRels = relationshipRoot(leftParts);
+  const leftRelsBytes = outParts.get('word/_rels/document.xml.rels');
+  const leftRels = leftRelsBytes ? parseXml(strFromU8(leftRelsBytes)) : null;
   const rightRels = relationshipRoot(rightParts);
   if (!leftRels || !rightRels) return { root, relationshipsXml: null };
 
@@ -899,54 +921,128 @@ function remapHyperlinkRelationshipCollisions(
   return { root: rewrittenRoot, relationshipsXml: writeRelationshipsPart(rewrittenRels) };
 }
 
-function importRightRelatedParts(
-  root: XElement,
+// Relationship attribute names the media import remaps (C# ComparisonUnitWord.s_RelationshipAttributeNames).
+const MEDIA_REL_LOCALS = new Set(['embed', 'link', 'id', 'cs', 'dm', 'lo', 'qs', 'href', 'pict']);
+const C_NS = 'http://schemas.openxmlformats.org/drawingml/2006/chart';
+const C_EXTERNAL_DATA = xname(C_NS, 'externalData');
+
+function isMediaRelationshipAttribute(name: XName): boolean {
+  return name.ns === R_NS && MEDIA_REL_LOCALS.has(name.local);
+}
+
+/**
+ * Import media parts referenced by the registered RIGHT-sourced clones into the output package —
+ * the C# ImportRightSourcedMedia / WmlComparer.MoveRelatedPartsToDestination semantics: walk each
+ * registered clone's DESCENDANTS (self excluded) in registry order; every relationship attribute
+ * that resolves in the RIGHT part's relationships imports a FRESH copy of its target part (per
+ * occurrence, no dedup) under a generated P-name, appends a fresh relationship, and remaps the
+ * attribute IN PLACE. w:headerReference/w:footerReference elements are skipped (left parts are
+ * authoritative), as are c:externalData and External-mode relationships. An attribute already
+ * remapped by an earlier (containing) clone no longer resolves in the right rels — skipped, which
+ * is exactly the C# dangling-relationship skip.
+ */
+function importRightSourcedMedia(
+  state: RenderState,
+  outParts: Map<string, Uint8Array>,
+  rightParts: Record<string, Uint8Array>,
+): void {
+  if (state.rightSourcedClones.length === 0) return;
+  const rightRelsRoot = relationshipRootForPart(rightParts, 'word/document.xml');
+  if (!rightRelsRoot) return;
+  const rightRels = relationshipsById(rightRelsRoot);
+  const destRelsName = relsPartName('word/document.xml');
+  const destRelsRoot = ensureRelationshipsRoot(outParts, destRelsName);
+  const used = new Set(relationshipsById(destRelsRoot).keys());
+  let changed = false;
+  for (const clone of state.rightSourcedClones) {
+    if (importCloneMedia(clone, rightRels, 'word/document.xml', destRelsRoot, used, outParts, rightParts, true)) changed = true;
+  }
+  if (changed) outParts.set(destRelsName, strToU8(writeRelationshipsPart(destRelsRoot)));
+}
+
+function importCloneMedia(
+  clone: XElement,
+  sourceRels: ReadonlyMap<string, XElement>,
+  sourcePartName: string,
+  destRelsRoot: XElement,
+  used: Set<string>,
+  outParts: Map<string, Uint8Array>,
+  rightParts: Record<string, Uint8Array>,
+  skipHeaderFooterReferences: boolean,
+): boolean {
+  let changed = false;
+  for (const el of clone.descendants()) {
+    if (nameEquals(el.name, C_EXTERNAL_DATA)) continue;
+    if (skipHeaderFooterReferences && (nameEquals(el.name, W.headerReference) || nameEquals(el.name, W.footerReference))) continue;
+    for (const a of [...el.attributeInfos()]) {
+      if (!isMediaRelationshipAttribute(a.name)) continue;
+      const rel = sourceRels.get(a.value);
+      if (!rel || rel.attribute(REL_TARGET_MODE) === 'External') continue;
+      const newId = importPartOccurrence(outParts, rightParts, sourcePartName, rel, destRelsRoot, used);
+      if (!newId) continue;
+      el.setAttributeValue(a.name, newId);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+/** Copy one relationship's target part from the RIGHT package as a FRESH part (P-name, original
+ * extension), register its content type, append a fresh relationship to the destination rels root,
+ * and — for XML parts — recursively import ITS related parts, then re-save it in the formatted
+ * XDocument.Save shape (the oracle round-trips every imported XML part that way). */
+function importPartOccurrence(
   outParts: Map<string, Uint8Array>,
   rightParts: Record<string, Uint8Array>,
   sourcePartName: string,
-  destPartName: string,
-): XElement {
-  let rewritten = root;
-  const leftRelsRoot = ensureRelationshipsRoot(outParts, relsPartName(destPartName));
-  const rightRelsRoot = relationshipRootForPart(rightParts, sourcePartName);
-  if (!rightRelsRoot) return root;
-  const rightRels = relationshipsById(rightRelsRoot);
-  const used = new Set(relationshipsById(leftRelsRoot).keys());
-  const rewrites = new Map<string, string>();
+  rightRel: XElement,
+  destRelsRoot: XElement,
+  used: Set<string>,
+): string | null {
+  const target = rightRel.attribute(REL_TARGET);
+  const type = rightRel.attribute(REL_TYPE);
+  if (!target || !type) return null;
+  const sourcePart = resolveTargetPart(sourcePartName, target);
+  const bytes = rightParts[sourcePart];
+  if (!bytes) return null;
+  const contentType = contentTypeForPart(rightParts, sourcePart);
+  const importedPart = freshImportedPartName(outParts, sourcePart);
+  outParts.set(importedPart, bytes);
+  if (contentType) addContentTypeForImportedPart(outParts, importedPart, contentType);
 
-  for (const el of descendantsAndSelf(root)) {
-    if (isDeletedRevisionContext(el)) continue;
-    for (const a of el.attributeInfos()) {
-      if (!isRelationshipAttribute(a.name)) continue;
-      const oldId = a.value;
-      if (rewrites.has(oldId)) continue;
-      const rightRel = rightRels.get(oldId);
-      if (!rightRel || rightRel.attribute(REL_TARGET_MODE) === 'External') continue;
-      if (isHeaderFooterRelationship(rightRel)) continue;
-      const imported = importRelationshipTarget(outParts, rightParts, sourcePartName, destPartName, rightRel, leftRelsRoot, used);
-      if (imported) rewrites.set(oldId, imported);
-    }
+  const newId = freshImportedRelationshipId(used);
+  used.add(newId);
+  const newRelationship = packageRelationship(type, `/${importedPart}`, newId);
+  destRelsRoot.children.push(newRelationship);
+  newRelationship.parent = destRelsRoot;
+
+  if (importedPart.toLowerCase().endsWith('.xml')) {
+    const importedRoot = parseXml(strFromU8(bytes));
+    importPartTreeMedia(importedRoot, outParts, rightParts, sourcePart, importedPart);
+    outParts.set(importedPart, strToU8(writeXmlPartFormatted(importedRoot, xdocumentDeclaration(importedRoot))));
   }
-  if (rewrites.size === 0) return root;
-
-  rewritten = rewriteRelationshipIdsTopDown(root, rewrites, false);
-  outParts.set(relsPartName(destPartName), strToU8(writeRelationshipsPart(leftRelsRoot)));
-  return rewritten;
+  return newId;
 }
 
-function rewriteRelationshipIdsTopDown(node: XElement, rewrites: ReadonlyMap<string, string>, inDeleted: boolean): XElement {
-  const deletedHere = nameEquals(node.name, W.del) || nameEquals(node.name, W.moveFrom);
-  const insertedHere = nameEquals(node.name, W.ins) || nameEquals(node.name, W.moveTo);
-  const childDeleted = insertedHere ? false : inDeleted || deletedHere;
-  let changed = false;
-  const attrs = [...node.attributeInfos()].map((a) => {
-    const next = !childDeleted && isRelationshipAttribute(a.name) ? rewrites.get(a.value) : undefined;
-    if (!next) return a;
-    changed = true;
-    return { ...a, value: next };
-  });
-  const children = node.children.map((c) => c instanceof XElement ? rewriteRelationshipIdsTopDown(c, rewrites, childDeleted) : c);
-  return changed || children.some((c, i) => c !== node.children[i]) ? cloneElement(node, { attributes: attrs, children }) : node;
+/** The nested-import step of the C# recursion: walk the WHOLE imported part tree (no clone
+ * registry at this depth), importing every resolvable media relationship per occurrence into the
+ * imported part's OWN rels file. */
+function importPartTreeMedia(
+  partRoot: XElement,
+  outParts: Map<string, Uint8Array>,
+  rightParts: Record<string, Uint8Array>,
+  rightPartName: string,
+  destPartName: string,
+): void {
+  const rightRelsRoot = relationshipRootForPart(rightParts, rightPartName);
+  if (!rightRelsRoot) return;
+  const rightRels = relationshipsById(rightRelsRoot);
+  const destRelsName = relsPartName(destPartName);
+  const destRelsRoot = ensureRelationshipsRoot(outParts, destRelsName);
+  const used = new Set(relationshipsById(destRelsRoot).keys());
+  if (importCloneMedia(partRoot, rightRels, rightPartName, destRelsRoot, used, outParts, rightParts, false)) {
+    outParts.set(destRelsName, strToU8(writeRelationshipsPart(destRelsRoot)));
+  }
 }
 
 function renderNoteScopes(
@@ -981,7 +1077,7 @@ function ensureNotePart(
     if (id !== null && Number.isFinite(Number(id)) && Number(id) <= 0) root.children.push(cloneElement(n));
   }
   for (const child of root.children) if (child instanceof XElement) child.parent = root;
-  outParts.set(partName, strToU8(writeMainXmlPart(linqOutputShape(root))));
+  outParts.set(partName, strToU8(writeNoteXmlPart(linqOutputShape(root))));
 }
 
 function applyNoteDiffs(
@@ -1021,10 +1117,179 @@ function applyNoteDiffs(
     for (const op of diff.ops) renderBlockOp(op, state, blocks);
     noteEl.children.splice(0, noteEl.children.length, ...noteEl.children.filter((c) => !(c instanceof XElement && (nameEquals(c.name, W.p) || nameEquals(c.name, W.tbl)))), ...blocks.map((b) => stripUnids(b)));
     for (const child of noteEl.children) if (child instanceof XElement) child.parent = noteEl;
-    if (diff.leftNoteId !== null && diff.noteId !== diff.leftNoteId) noteEl = replaceElementAttributes(noteEl, W.id, diff.noteId);
+    if (diff.leftNoteId !== null && diff.noteId !== diff.leftNoteId) {
+      const rewritten = replaceElementAttributes(noteEl, W.id, diff.noteId);
+      replaceElementInParent(noteEl, rewritten);
+      noteEl = rewritten;
+    }
     changed = true;
   }
-  if (changed) outParts.set(partName, strToU8(writeMainXmlPart(linqOutputShape(stripUnids(root)))));
+  if (changed) outParts.set(partName, strToU8(writeNoteXmlPart(linqOutputShape(stripUnids(root)))));
+}
+
+// ----------------------------------------------------------------- header/footer story markup
+
+/**
+ * Apply header/footer story edit ops inside the output package's header/footer parts (the C#
+ * RenderHeaderFooterScopes port). A MATCHED story (left part URI set) rebuilds that part's
+ * block-level children from its ops with native markup; a RIGHT-only story creates a fresh part,
+ * attaches a typed w:headerReference/w:footerReference to the target section's sectPr, and ensures
+ * the story's visibility flag (w:titlePg / w:evenAndOddHeaders). Right-sourced clones inside a
+ * story import their media relationships into THAT part (relationship ids are part-scoped).
+ */
+function renderHeaderFooterScopes(
+  script: IrEditScript,
+  state: RenderState,
+  outParts: Map<string, Uint8Array>,
+  rightParts: Record<string, Uint8Array>,
+  documentRoot: XElement,
+): void {
+  if (!script.headerFooterOps || script.headerFooterOps.length === 0) return;
+  for (const diff of script.headerFooterOps) {
+    if (diff.leftPartUri) applyHeaderFooterDiffToPart(diff, state, outParts, rightParts);
+    else insertHeaderFooterStory(diff, state, outParts, rightParts, documentRoot);
+  }
+}
+
+function applyHeaderFooterDiffToPart(
+  diff: IrHeaderFooterDiff,
+  state: RenderState,
+  outParts: Map<string, Uint8Array>,
+  rightParts: Record<string, Uint8Array>,
+): void {
+  const partName = diff.leftPartUri!.replace(/^\//, '');
+  const bytes = outParts.get(partName);
+  if (!bytes) return; // left part vanished (malformed input) — keep the carry-over
+  const root = parseXml(strFromU8(bytes));
+
+  // Slice the clone registry around this story's render so ONLY its clones import into this part.
+  const clonesBefore = state.rightSourcedClones.length;
+  const blocks: XElement[] = [];
+  for (const op of diff.ops) renderBlockOp(op, state, blocks);
+
+  const kept = root.children.filter((c) => !(c instanceof XElement && (nameEquals(c.name, W.p) || nameEquals(c.name, W.tbl))));
+  root.children.splice(0, root.children.length, ...kept, ...blocks);
+  for (const child of root.children) if (child instanceof XElement) child.parent = root;
+
+  importStorySourcedRelationships(diff, state, clonesBefore, partName, outParts, rightParts);
+  outParts.set(partName, strToU8(writeNoteXmlPart(linqOutputShape(stripUnids(root)))));
+}
+
+function insertHeaderFooterStory(
+  diff: IrHeaderFooterDiff,
+  state: RenderState,
+  outParts: Map<string, Uint8Array>,
+  rightParts: Record<string, Uint8Array>,
+  documentRoot: XElement,
+): void {
+  if (!diff.rightPartUri) return;
+  const rightPartName = diff.rightPartUri.replace(/^\//, '');
+  const rightBytes = rightParts[rightPartName];
+  if (!rightBytes) return;
+  const rightRoot = parseXml(strFromU8(rightBytes));
+
+  // Locate the target sectPr FIRST — a story that cannot attach must not create an orphan part.
+  const body = documentRoot.element(W.body);
+  if (!body) return;
+  const sectPrs = [...body.descendants(W.sectPr)];
+  if (diff.sectionIndex >= sectPrs.length) return;
+  const sectPr = sectPrs[diff.sectionIndex]!;
+
+  const partName = freshHeaderFooterPartName(outParts, diff.isHeader);
+  const newRoot = element(rightRoot.name, [...rightRoot.attributeInfos()]);
+  const clonesBefore = state.rightSourcedClones.length;
+  const blocks: XElement[] = [];
+  for (const op of diff.ops) renderBlockOp(op, state, blocks);
+  newRoot.children.push(...blocks);
+  for (const child of newRoot.children) if (child instanceof XElement) child.parent = newRoot;
+
+  addContentTypeOverride(outParts, partName, diff.isHeader
+    ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml'
+    : 'application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml');
+  const relsName = relsPartName('word/document.xml');
+  const relsRoot = ensureRelationshipsRoot(outParts, relsName);
+  const used = new Set(relationshipsById(relsRoot).keys());
+  const relId = freshImportedRelationshipId(used);
+  const rel = packageRelationship(`${WORD_REL_PREFIX}${diff.isHeader ? 'header' : 'footer'}`, `/${partName}`, relId);
+  relsRoot.children.push(rel);
+  rel.parent = relsRoot;
+  outParts.set(relsName, strToU8(writeRelationshipsPart(relsRoot)));
+
+  importStorySourcedRelationships(diff, state, clonesBefore, partName, outParts, rightParts);
+  outParts.set(partName, strToU8(writeNoteXmlPart(linqOutputShape(stripUnids(newRoot)))));
+
+  // Attach the reference (header/footer references lead the CT_SectPr sequence, so prepending is
+  // always schema-ordered) and ensure the story's visibility flag.
+  const refName = diff.isHeader ? W.headerReference : W.footerReference;
+  const typeValue = diff.kind === 'First' ? 'first' : diff.kind === 'Even' ? 'even' : 'default';
+  const ref = element(refName, [attr(W.type, typeValue), attr(R.id, relId)]);
+  sectPr.children.unshift(ref);
+  ref.parent = sectPr;
+  if (diff.kind === 'First' && !sectPr.element(xname(W_NS, 'titlePg'))) {
+    insertIntoSectPr(sectPr, element(xname(W_NS, 'titlePg')));
+  }
+  if (diff.kind === 'Even') ensureEvenAndOddHeaders(outParts);
+}
+
+/** Elements that FOLLOW w:titlePg in the CT_SectPr sequence — an insertion lands before the first
+ * of these (or at the end), keeping the sectPr schema-ordered. */
+const SECT_PR_AFTER_TITLE_PG = ['textDirection', 'bidi', 'rtlGutter', 'docGrid', 'printerSettings', 'sectPrChange'];
+
+function insertIntoSectPr(sectPr: XElement, el: XElement): void {
+  const idx = sectPr.children.findIndex((c) => c instanceof XElement && c.name.ns === W_NS && SECT_PR_AFTER_TITLE_PG.includes(c.name.local));
+  sectPr.children.splice(idx >= 0 ? idx : sectPr.children.length, 0, el);
+  el.parent = sectPr;
+}
+
+/** Ensure the settings part carries w:evenAndOddHeaders (required for an Even story to render). */
+function ensureEvenAndOddHeaders(outParts: Map<string, Uint8Array>): void {
+  const settingsName = 'word/settings.xml';
+  const bytes = outParts.get(settingsName);
+  const root = bytes ? parseXml(strFromU8(bytes)) : element(xname(W_NS, 'settings'), [attr(xname(XMLNS_NS, 'w'), W_NS)]);
+  const flagName = xname(W_NS, 'evenAndOddHeaders');
+  if (root.element(flagName)) return;
+  const flag = element(flagName);
+  root.children.push(flag);
+  flag.parent = root;
+  outParts.set(settingsName, strToU8(writeNoteXmlPart(linqOutputShape(root))));
+}
+
+function freshHeaderFooterPartName(outParts: ReadonlyMap<string, Uint8Array>, isHeader: boolean): string {
+  const stem = isHeader ? 'header' : 'footer';
+  let n = 1;
+  while (outParts.has(`word/${stem}${n}.xml`)) n++;
+  return `word/${stem}${n}.xml`;
+}
+
+/**
+ * Import media parts referenced by the clones registered during ONE story's render (the
+ * watermark marks the registry position before the story rendered) from the RIGHT story part into
+ * the output story part. Relationship ids are part-scoped in OOXML, which is why the body's
+ * main-part import cannot serve header/footer content.
+ */
+function importStorySourcedRelationships(
+  diff: IrHeaderFooterDiff,
+  state: RenderState,
+  clonesBefore: number,
+  outputPartName: string,
+  outParts: Map<string, Uint8Array>,
+  rightParts: Record<string, Uint8Array>,
+): void {
+  if (!diff.rightPartUri) return;
+  const storyClones = state.rightSourcedClones.slice(clonesBefore);
+  if (storyClones.length === 0) return;
+  const rightPartName = diff.rightPartUri.replace(/^\//, '');
+  const rightRelsRoot = relationshipRootForPart(rightParts, rightPartName);
+  if (!rightRelsRoot) return;
+  const rightRels = relationshipsById(rightRelsRoot);
+  const destRelsName = relsPartName(outputPartName);
+  const destRelsRoot = ensureRelationshipsRoot(outParts, destRelsName);
+  const used = new Set(relationshipsById(destRelsRoot).keys());
+  let changed = false;
+  for (const clone of storyClones) {
+    if (importCloneMedia(clone, rightRels, rightPartName, destRelsRoot, used, outParts, rightParts, true)) changed = true;
+  }
+  if (changed) outParts.set(destRelsName, strToU8(writeRelationshipsPart(destRelsRoot)));
 }
 
 function renumberNoteIds(
@@ -1082,7 +1347,7 @@ function renumberNoteIds(
   const nonNoteChildren = noteRoot.children.filter((c) => !(c instanceof XElement && nameEquals(c.name, noteName)));
   noteRoot.children.splice(0, noteRoot.children.length, ...nonNoteChildren, ...reserved, ...ordered);
   for (const child of noteRoot.children) if (child instanceof XElement) child.parent = noteRoot;
-  outParts.set(partName, strToU8(writeMainXmlPart(linqOutputShape(noteRoot))));
+  outParts.set(partName, strToU8(writeNoteXmlPart(linqOutputShape(noteRoot))));
   return remap;
 }
 
@@ -1099,7 +1364,7 @@ function remapNestedNoteReferences(outParts: Map<string, Uint8Array>, footnoteRe
       const mapped = id ? remap.get(id) : undefined;
       return mapped ? replaceElementAttributes(node, W.id, mapped) : null;
     });
-    outParts.set(partName, strToU8(writeMainXmlPart(linqOutputShape(rewritten))));
+    outParts.set(partName, strToU8(writeNoteXmlPart(linqOutputShape(rewritten))));
   }
 }
 
@@ -1123,38 +1388,11 @@ function replaceElementAttributes(el: XElement, name: XName, value: string): XEl
   return withAttribute(el, name, value);
 }
 
-function importRelationshipTarget(
-  outParts: Map<string, Uint8Array>,
-  rightParts: Record<string, Uint8Array>,
-  sourcePartName: string,
-  destPartName: string,
-  rightRel: XElement,
-  destRelsRoot: XElement,
-  used: Set<string>,
-): string | null {
-  const target = rightRel.attribute(REL_TARGET);
-  const type = rightRel.attribute(REL_TYPE);
-  if (!target || !type) return null;
-  const sourcePart = resolveTargetPart(sourcePartName, target);
-  const bytes = rightParts[sourcePart];
-  if (!bytes) return null;
-  const contentType = contentTypeForPart(rightParts, sourcePart);
-  const importedPart = freshImportedPartName(outParts, sourcePart);
-  outParts.set(importedPart, bytes);
-  if (contentType) addContentTypeForImportedPart(outParts, importedPart, contentType);
-
-  const newId = freshImportedRelationshipId(used);
-  used.add(newId);
-  const newRelationship = packageRelationship(type, `/${importedPart}`, newId);
-  destRelsRoot.children.push(newRelationship);
-  newRelationship.parent = destRelsRoot;
-
-  if (importedPart.toLowerCase().endsWith('.xml')) {
-    const importedRoot = parseXml(strFromU8(bytes));
-    const fixedRoot = importRightRelatedParts(importedRoot, outParts, rightParts, sourcePart, importedPart);
-    if (fixedRoot !== importedRoot) outParts.set(importedPart, strToU8(writeMainXmlPart(fixedRoot)));
-  }
-  return newId;
+function xdocumentDeclaration(root: XElement): string {
+  const standalone = root.documentProlog?.includes('standalone="yes"') ?? false;
+  return standalone
+    ? '<?xml version="1.0" encoding="utf-8" standalone="yes"?>'
+    : '<?xml version="1.0" encoding="utf-8"?>';
 }
 
 function ensureRelationshipsRoot(parts: Map<string, Uint8Array>, name: string): XElement {
@@ -1200,6 +1438,20 @@ function writeMainXmlPart(root: XElement): string {
   return writeXmlPart(cloneElement(root, { documentProlog: '<?xml version="1.0" encoding="utf-8" standalone="yes"?>\n' }));
 }
 
+// A note part CREATED by this render (absent in the left package) serializes with a bare
+// declaration — the oracle writes fresh parts via XmlWriter defaults (no newline), while parts
+// that existed in the left package round-trip through its XDocument save shape (newline).
+// Freshly created parts only ever carry the bare prolog (we wrote it), so preserving a bare
+// parsed prolog and normalizing everything else reproduces the distinction without threading
+// freshness through every write site.
+const BARE_NOTE_PROLOG = '<?xml version="1.0" encoding="utf-8" standalone="yes"?>';
+
+function writeNoteXmlPart(root: XElement): string {
+  const fresh = root.documentProlog === null || root.documentProlog === BARE_NOTE_PROLOG;
+  const prolog = fresh ? BARE_NOTE_PROLOG : `${BARE_NOTE_PROLOG}\n`;
+  return writeXmlPart(cloneElement(root, { documentProlog: prolog }));
+}
+
 function writeRelationshipsPart(root: XElement): string {
   return writeXmlPart(relationshipOutputShape(root));
 }
@@ -1236,45 +1488,13 @@ function relsPartName(partName: string): string {
   return `${dir}_rels/${file}.rels`;
 }
 
-function sameRelationship(a: XElement, b: XElement): boolean {
-  return a.attribute(REL_TYPE) === b.attribute(REL_TYPE) &&
-    a.attribute(REL_TARGET) === b.attribute(REL_TARGET) &&
-    a.attribute(REL_TARGET_MODE) === b.attribute(REL_TARGET_MODE);
-}
 
-function isHeaderFooterRelationship(rel: XElement): boolean {
-  const type = rel.attribute(REL_TYPE) ?? '';
-  return type === `${WORD_REL_PREFIX}header` || type === `${WORD_REL_PREFIX}footer`;
-}
 
-function sameRelationshipTargetBytes(
-  leftParts: Record<string, Uint8Array>,
-  rightParts: Record<string, Uint8Array>,
-  partName: string,
-  leftRel: XElement,
-  rightRel: XElement,
-): boolean {
-  const leftTarget = leftRel.attribute(REL_TARGET);
-  const rightTarget = rightRel.attribute(REL_TARGET);
-  if (!leftTarget || !rightTarget) return false;
-  const leftBytes = leftParts[resolveTargetPart(partName, leftTarget)];
-  const rightBytes = rightParts[resolveTargetPart(partName, rightTarget)];
-  if (!leftBytes || !rightBytes || leftBytes.length !== rightBytes.length) return false;
-  for (let i = 0; i < leftBytes.length; i++) if (leftBytes[i] !== rightBytes[i]) return false;
-  return true;
-}
 
 function isRelationshipAttribute(name: XName): boolean {
   return name.ns === R_NS;
 }
 
-function isDeletedRevisionContext(el: XElement): boolean {
-  for (let p: XElement | null = el; p; p = p.parent) {
-    if (nameEquals(p.name, W.del) || nameEquals(p.name, W.moveFrom)) return true;
-    if (nameEquals(p.name, W.ins) || nameEquals(p.name, W.moveTo)) return false;
-  }
-  return false;
-}
 
 function freshImportedRelationshipId(used: ReadonlySet<string>): string {
   let n = 1;
@@ -1297,10 +1517,6 @@ function freshImportedPartName(parts: ReadonlyMap<string, Uint8Array>, sourcePar
   return candidate;
 }
 
-function relativeTargetFromPart(fromPart: string, toPart: string): string {
-  const fromDir = fromPart.includes('/') ? fromPart.slice(0, fromPart.lastIndexOf('/') + 1) : '';
-  return toPart.startsWith(fromDir) ? toPart.slice(fromDir.length) : `/${toPart}`;
-}
 
 function resolveTargetPart(sourcePart: string, target: string): string {
   if (target.startsWith('/')) return target.slice(1);
@@ -1355,7 +1571,10 @@ function addContentTypeDefault(parts: Map<string, Uint8Array>, extension: string
     if ((def.attribute(CT_EXTENSION) ?? '').toLowerCase() === extension.toLowerCase()) return;
   }
   const def = element(CT_DEFAULT, [attr(CT_EXTENSION, extension), attr(CT_CONTENT_TYPE, contentType)]);
-  root.children.push(def);
+  // System.IO.Packaging keeps the part grouped: Defaults lead, Overrides follow — a new Default
+  // lands after the last existing Default, not at the end of the part.
+  const lastDefault = root.children.reduce((acc, c, i) => c instanceof XElement && nameEquals(c.name, CT_DEFAULT) ? i : acc, -1);
+  root.children.splice(lastDefault >= 0 ? lastDefault + 1 : 0, 0, def);
   def.parent = root;
   parts.set(CONTENT_TYPES, strToU8(writeContentTypesPart(root)));
 }

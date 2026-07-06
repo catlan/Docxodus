@@ -58,21 +58,7 @@ function markupSkipReason(leftName: string, rightName: string): string | null {
 // fixture by fixture. Pairs here are KNOWN divergent — the test asserts
 // the divergence still exists, so a FIX flips the test loudly and the
 // pair must be removed from this list (never grows, only shrinks).
-const KNOWN_DIVERGENT = new Set<string>([
-  'WC-BodyBookmarks-Before.docx -> WC-BodyBookmarks-After.docx',
-  'WC014-SmartArt-Before.docx -> WC014-SmartArt-After.docx',
-  'WC052-SmartArt-Same.docx -> WC052-SmartArt-Same-Mod.docx',
-  'self WC/WC-BodyBookmarks-Before.docx',
-  'WC004-Large.docx -> WC004-Large-Mod.docx',
-  'WC014-SmartArt-With-Image-Before.docx -> WC014-SmartArt-With-Image-After.docx',
-  'WC023-Table-4-Row-Image-Before.docx -> WC023-Table-4-Row-Image-After-Delete-1-Row.docx',
-  'WC034-Endnotes-Before.docx -> WC034-Endnotes-After3.docx',
-  'WC034-Footnotes-Before.docx -> WC034-Footnotes-After3.docx',
-  'WC035-Endnote-Before.docx -> WC035-Endnote-After.docx',
-  'WC035-Footnote-Before.docx -> WC035-Footnote-After.docx',
-  'WC059-Footnote.docx -> WC059-Footnote-Mod.docx',
-  'WC060-Endnote.docx -> WC060-Endnote-Mod.docx',
-]);
+const KNOWN_DIVERGENT = new Set<string>([]);
 
 
 async function expectPartMapParity(
