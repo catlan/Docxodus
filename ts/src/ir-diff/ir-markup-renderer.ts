@@ -1293,7 +1293,9 @@ function ensureEvenAndOddHeaders(outParts: Map<string, Uint8Array>): void {
       'application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml');
     ensureDocumentRelationship(outParts, settingsName, 'settings');
   }
-  const root = bytes ? parseXml(strFromU8(bytes)) : element(xname(W_NS, 'settings'), [attr(xname(XMLNS_NS, 'w'), W_NS)]);
+  const root = bytes
+    ? parseXml(strFromU8(bytes))
+    : element(xname(W_NS, 'settings'), [{ name: xname(XMLNS_NS, 'w'), value: W_NS, prefix: 'xmlns', rawName: 'xmlns:w' }]);
   const flagName = xname(W_NS, 'evenAndOddHeaders');
   if (root.element(flagName)) return;
   const flag = element(flagName);
