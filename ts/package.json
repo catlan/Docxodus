@@ -19,6 +19,7 @@
     "saxes": "^6.0.0"
   },
   "devDependencies": {
+    "@types/node": "^22.0.0",
     "docxodus": "workspace:*",
     "typescript": "^5.9.0",
     "vitest": "^3.0.0"
